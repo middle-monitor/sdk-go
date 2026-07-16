@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"runtime"
@@ -16,7 +16,7 @@ import (
 const defaultPprofURL = "http://localhost:6060"
 
 // CaptureCPUProfile collects a CPU profile for the given duration from the local pprof server,
-// then uploads it to the Middle-Monitor API. The process must expose pprof (e.g. import _ "net/http/pprof" and serve on PprofURL).
+// then uploads it to the Middle-Monitor API.
 func (c *Client) CaptureCPUProfile(ctx context.Context, duration time.Duration) error {
 	cfg := c.config
 	if cfg == nil || cfg.Endpoint == "" || cfg.Token == "" {
@@ -36,24 +36,24 @@ func (c *Client) CaptureCPUProfile(ctx context.Context, duration time.Duration) 
 	url := strings.TrimSuffix(pprofURL, "/") + fmt.Sprintf("/debug/pprof/profile?seconds=%d", seconds)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("create pprof request: %w", err)
+		return fmt.Errorf("create pprof request: %w", ErrPprofRequest)
 	}
 	client := &http.Client{Timeout: duration + 10*time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch cpu profile: %w", err)
+		return fmt.Errorf("fetch cpu profile: %w", ErrProfileFetch)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("pprof server returned %d: %s", resp.StatusCode, string(body))
+		return &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read profile: %w", err)
+		return fmt.Errorf("read profile: %w", ErrProfileRead)
 	}
 	if len(data) == 0 {
-		return fmt.Errorf("empty profile data")
+		return ErrProfileEmpty
 	}
 	return uploadProfile(cfg, "cpu", &seconds, nil, data)
 }
@@ -71,24 +71,24 @@ func (c *Client) CaptureHeapProfile(ctx context.Context) error {
 	url := strings.TrimSuffix(pprofURL, "/") + "/debug/pprof/heap"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("create pprof request: %w", err)
+		return fmt.Errorf("create pprof request: %w", ErrPprofRequest)
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch heap profile: %w", err)
+		return fmt.Errorf("fetch heap profile: %w", ErrProfileFetch)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("pprof server returned %d: %s", resp.StatusCode, string(body))
+		return &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read profile: %w", err)
+		return fmt.Errorf("read profile: %w", ErrProfileRead)
 	}
 	if len(data) == 0 {
-		return fmt.Errorf("empty profile data")
+		return ErrProfileEmpty
 	}
 	var memoryMB *float64
 	var m runtime.MemStats
@@ -98,7 +98,7 @@ func (c *Client) CaptureHeapProfile(ctx context.Context) error {
 	return uploadProfile(cfg, "heap", nil, memoryMB, data)
 }
 
-// apiBase returns the HTTP base URL for the Middle-Monitor API (with scheme).
+// apiBase returns the HTTP base URL for the Middle-Monitor API.
 func apiBase(cfg *Config) string {
 	base := cfg.Endpoint
 	if base != "" && !strings.Contains(cfg.Endpoint, "://") {
@@ -127,19 +127,19 @@ func uploadProfile(cfg *Config, profileType string, durationSeconds *int, memory
 	}
 	part, err := w.CreateFormFile("profile", "profile.pprof")
 	if err != nil {
-		return fmt.Errorf("multipart create: %w", err)
+		return fmt.Errorf("create form: %w", ErrMultipartBuild)
 	}
 	if _, err = part.Write(data); err != nil {
-		return fmt.Errorf("multipart write: %w", err)
+		return fmt.Errorf("write form: %w", ErrMultipartBuild)
 	}
 	contentType := w.FormDataContentType()
 	if err = w.Close(); err != nil {
-		return fmt.Errorf("multipart close: %w", err)
+		return fmt.Errorf("close form: %w", ErrMultipartBuild)
 	}
 
 	req, err := http.NewRequest("POST", url, &buf)
 	if err != nil {
-		return fmt.Errorf("create upload request: %w", err)
+		return fmt.Errorf("create request: %w", ErrUploadRequest)
 	}
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
@@ -147,13 +147,13 @@ func uploadProfile(cfg *Config, profileType string, durationSeconds *int, memory
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload profile: %w", err)
+		return fmt.Errorf("upload: %w", ErrProfileUpload)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("upload returned %d: %s", resp.StatusCode, string(body))
+		return &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
-	log.Printf("[Middle-Monitor] uploaded %s profile (%d bytes)", profileType, len(data))
+	slog.Info("uploaded profile", "type", profileType, "bytes", len(data))
 	return nil
 }

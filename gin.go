@@ -3,6 +3,7 @@ package middlemonitor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -136,7 +137,7 @@ func GinMiddleware() gin.HandlerFunc {
 				case error:
 					panicErr = v
 				case string:
-					panicErr = fmt.Errorf("%s", v)
+					panicErr = errors.New(v)
 				default:
 					panicErr = fmt.Errorf("%v", v)
 				}

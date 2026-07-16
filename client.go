@@ -3,7 +3,7 @@ package middlemonitor
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"go.opentelemetry.io/otel"
@@ -32,11 +32,11 @@ type loggingTraceExporter struct {
 func (e *loggingTraceExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	err := e.exporter.ExportSpans(ctx, spans)
 	if err != nil {
-		log.Printf("[Middle-Monitor] failed to export traces to %s: %v", e.endpoint, err)
+		slog.Error("failed to export traces", "endpoint", e.endpoint, "error", err)
 		return err
 	}
 	if len(spans) > 0 {
-		log.Printf("[Middle-Monitor] exported %d trace(s) to %s", len(spans), e.endpoint)
+		slog.Debug("exported traces", "count", len(spans), "endpoint", e.endpoint)
 	}
 	return nil
 }
@@ -69,7 +69,7 @@ func newClient(cfg *Config) (*Client, error) {
 		),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
+		return nil, fmt.Errorf("failed to create resource: %w", ErrResourceCreate)
 	}
 
 	// Initialize trace exporter
@@ -88,7 +88,7 @@ func newClient(cfg *Config) (*Client, error) {
 	}
 	rawTraceExporter, err := otlptracehttp.New(ctx, traceOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
+		return nil, fmt.Errorf("failed to create trace exporter: %w", ErrTraceExport)
 	}
 	traceExporter = &loggingTraceExporter{exporter: rawTraceExporter, endpoint: hostPort}
 
@@ -118,7 +118,7 @@ func newClient(cfg *Config) (*Client, error) {
 		}
 		metricExporter, err := otlpmetrichttp.New(ctx, metricOpts...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+			return nil, fmt.Errorf("failed to create metric exporter: %w", ErrMetricExport)
 		}
 
 		// Create metric reader
@@ -153,22 +153,21 @@ func Init(cfg *Config) error {
 			var err error
 			cfg, err = ConfigFromEnv()
 			if err != nil {
-				initErr = fmt.Errorf("failed to load config: %w", err)
+				initErr = fmt.Errorf("failed to load config: %w", ErrConfigLoad)
 				return
 			}
 		}
 
 		client, err := NewClientWithConfig(cfg)
 		if err != nil {
-			initErr = fmt.Errorf("failed to create client: %w", err)
+			initErr = fmt.Errorf("failed to create client: %w", ErrClientCreate)
 			return
 		}
 
 		globalClient = client
 		globalConfig = cfg
 
-		log.Printf("[Middle-Monitor] initialized: service=%s, endpoint=%s",
-			cfg.Service, cfg.Endpoint)
+		slog.Info("middlemonitor initialized", "service", cfg.Service, "endpoint", cfg.Endpoint)
 	})
 
 	return initErr
@@ -220,18 +219,18 @@ func (c *Client) Shutdown(ctx context.Context) error {
 
 	if c.tp != nil {
 		if err := c.tp.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("failed to shutdown tracer provider: %w", err))
+			errs = append(errs, fmt.Errorf("failed to shutdown tracer provider: %w", ErrTracerShutdown))
 		}
 	}
 
 	if c.meterProvider != nil {
 		if err := c.meterProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("failed to shutdown meter provider: %w", err))
+			errs = append(errs, fmt.Errorf("failed to shutdown meter provider: %w", ErrMeterShutdown))
 		}
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("shutdown errors: %v", errs)
+		return fmt.Errorf("shutdown errors: %w (%v)", ErrShutdown, errs)
 	}
 
 	return nil

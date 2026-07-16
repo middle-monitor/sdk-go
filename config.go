@@ -212,7 +212,7 @@ func ConfigFromEnv() (*Config, error) {
 
 	// Parse sampling configuration from environment
 	if err := config.parseSamplingFromEnv(); err != nil {
-		return nil, fmt.Errorf("failed to parse sampling config: %w", err)
+		return nil, fmt.Errorf("parse sampling: %w", ErrSamplingConfig)
 	}
 
 	return config, nil
@@ -224,10 +224,10 @@ func (c *Config) parseSamplingFromEnv() error {
 	if tracesPercentage := os.Getenv("MIDDLE_MONITOR_TRACES_SAMPLING"); tracesPercentage != "" {
 		percentage, err := strconv.ParseFloat(tracesPercentage, 64)
 		if err != nil {
-			return fmt.Errorf("invalid MIDDLE_MONITOR_TRACES_SAMPLING: %w", err)
+			return fmt.Errorf("MIDDLE_MONITOR_TRACES_SAMPLING: %w", ErrSamplingValue)
 		}
 		if percentage < -1 || percentage > 1 {
-			return fmt.Errorf("MIDDLE_MONITOR_TRACES_SAMPLING must be between -1 and 1")
+			return ErrSamplingRange
 		}
 		c.Sampling.Traces.Percentage = percentage
 	}
@@ -241,7 +241,7 @@ func (c *Config) parseSamplingFromEnv() error {
 			case LogLevelDEBUG, LogLevelINFO, LogLevelWARN, LogLevelERROR, LogLevelFATAL, LogLevelPANIC:
 				levels = append(levels, level)
 			default:
-				return fmt.Errorf("invalid log level: %s", levelStr)
+				return fmt.Errorf("%s: %w", levelStr, ErrLogLevel)
 			}
 		}
 		if len(levels) > 0 {
@@ -253,7 +253,7 @@ func (c *Config) parseSamplingFromEnv() error {
 	if minHTTPStatus := os.Getenv("MIDDLE_MONITOR_LOGS_MIN_HTTP_STATUS"); minHTTPStatus != "" {
 		status, err := strconv.Atoi(minHTTPStatus)
 		if err != nil {
-			return fmt.Errorf("invalid MIDDLE_MONITOR_LOGS_MIN_HTTP_STATUS: %w", err)
+			return fmt.Errorf("MIDDLE_MONITOR_LOGS_MIN_HTTP_STATUS: %w", ErrMinHTTPStatus)
 		}
 		c.Sampling.Logs.MinHTTPStatus = status
 	}

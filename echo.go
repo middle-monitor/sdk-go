@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"runtime"
@@ -138,7 +139,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 					case error:
 						panicErr = v
 					case string:
-						panicErr = fmt.Errorf("%s", v)
+						panicErr = errors.New(v)
 					default:
 						panicErr = fmt.Errorf("%v", v)
 					}
@@ -481,11 +482,11 @@ func submitApplicationError(cfg *Config, name, message, file string, line, statu
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[Middle-Monitor] failed to submit error to backend: %v", err)
+		slog.Error("failed to submit error to backend", "error", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		log.Printf("[Middle-Monitor] backend errors API returned %d", resp.StatusCode)
+		slog.Warn("backend errors API returned error", "status", resp.StatusCode)
 	}
 }

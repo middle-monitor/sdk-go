@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -25,8 +25,7 @@ var (
 )
 
 // startLogFlusher launches a single background goroutine that periodically flushes
-// the log buffer, so low-volume logs are delivered within logFlushInterval instead
-// of waiting for the buffer to fill (logBufferSize) or for shutdown.
+// the log buffer, so low-volume logs are delivered within logFlushInterval.
 func startLogFlusher() {
 	flusherOnce.Do(func() {
 		go func() {
@@ -51,8 +50,7 @@ func Log(ctx context.Context, level LogLevel, message string, attrs map[string]s
 		return
 	}
 
-	// Ensure the periodic flusher is running so low-volume logs aren't stuck in
-	// the buffer until it fills or the process shuts down.
+	// Ensure the periodic flusher is running
 	startLogFlusher()
 
 	record := buildLogRecord(level, message, attrs, cfg)
@@ -141,8 +139,8 @@ func flushLogs(ctx context.Context, client *Client, cfg *Config) {
 	logBufferMu.Unlock()
 
 	if err := sendLogs(ctx, toSend, cfg); err != nil {
-		log.Printf("[Middle-Monitor] failed to flush logs: %v", err)
-		// Re-add to buffer on failure (optional: could drop to avoid unbounded growth)
+		slog.Error("failed to flush logs", "error", err)
+		// Re-add to buffer on failure
 		logBufferMu.Lock()
 		logBuffer = append(toSend, logBuffer...)
 		logBufferMu.Unlock()
@@ -179,7 +177,7 @@ func sendLogs(ctx context.Context, records []*logspb.LogRecord, cfg *Config) err
 
 	data, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("marshal logs: %w", err)
+		return fmt.Errorf("marshal logs: %w", ErrMarshal)
 	}
 
 	scheme := "https"
@@ -190,7 +188,7 @@ func sendLogs(ctx context.Context, records []*logspb.LogRecord, cfg *Config) err
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("create request: %w", ErrRequestCreate)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/x-protobuf")
@@ -201,12 +199,12 @@ func sendLogs(ctx context.Context, records []*logspb.LogRecord, cfg *Config) err
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("send logs: %w", err)
+		return fmt.Errorf("send logs: %w", ErrLogSend)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("logs export failed: status %d", resp.StatusCode)
+		return &HTTPStatusError{StatusCode: resp.StatusCode}
 	}
 
 	return nil

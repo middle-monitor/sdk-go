@@ -2,8 +2,9 @@ package middlemonitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"runtime"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -31,27 +32,25 @@ type requestContextKey struct{}
 // when called from an HTTP handler (avoids duplicate submission and ensures correct message).
 type frameworkContextKey struct{}
 
-// NewClient creates a Middle-Monitor client backed by OpenTelemetry.
-// Prefer Init + GetGlobalClient for most use cases.
+// NewClient creates a client. Prefer Init + GetGlobalClient for most cases.
 func NewClient(apiURL, service string) *Client {
 	cfg := NewConfig(apiURL, service, "")
 	client, err := NewClientWithConfig(cfg)
 	if err != nil {
-		log.Printf("Failed to create OpenTelemetry client: %v", err)
+		slog.Error("failed to create client", "error", err)
 		return nil
 	}
 	return client
 }
 
-// SetToken sets the authentication token for the client
+// SetToken sets the auth token.
 func (c *Client) SetToken(token string) {
 	if c.config != nil {
 		c.config.Token = token
 	}
 }
 
-// ReportError reports an error to Middle-Monitor using OpenTelemetry
-// This creates a span and log record for the error
+// ReportError reports an error to Middle-Monitor using OpenTelemetry.
 func (c *Client) ReportError(err error) error {
 	return c.ReportErrorWithDetails(err, "", 0)
 }
@@ -88,7 +87,7 @@ func (c *Client) ReportErrorWithDetails(err error, file string, line int) error 
 	return nil
 }
 
-// ReportCustomError reports a custom error with all details using OpenTelemetry.
+// ReportCustomError reports a named error with details.
 func (c *Client) ReportCustomError(name, message, file string, line int) error {
 	if c == nil || c.tracer == nil {
 		return ErrNotInitialized
@@ -113,7 +112,7 @@ func (c *Client) ReportCustomError(name, message, file string, line int) error {
 	return nil
 }
 
-// ReportCustomErrorWithHTTP reports a custom error with HTTP context using OpenTelemetry.
+// ReportCustomErrorWithHTTP reports a named error with HTTP context.
 func (c *Client) ReportCustomErrorWithHTTP(name, message, file string, line int, httpMethod, httpURL, httpHeaders, httpBody string) error {
 	if c == nil || c.tracer == nil {
 		return ErrNotInitialized
@@ -147,10 +146,7 @@ func (c *Client) ReportCustomErrorWithHTTP(name, message, file string, line int,
 	return nil
 }
 
-// SubmitApplicationError reports an error to the Sentry-style Errors view
-// (POST /api/v1/errors), where errors are grouped by fingerprint with stats.
-// This is distinct from ReportError/ReportCustomError, which record error spans
-// in the Traces view.
+// SubmitApplicationError reports an error to the Errors view (POST /api/v1/errors).
 func (c *Client) SubmitApplicationError(name, message, file string, line, statusCode int, httpMethod, httpURL, requestBody string) {
 	if c == nil || c.config == nil {
 		return
@@ -171,7 +167,7 @@ func (c *Client) CapturePanic() {
 		case error:
 			err = v
 		case string:
-			err = fmt.Errorf("%s", v)
+			err = errors.New(v)
 		default:
 			err = fmt.Errorf("%v", v)
 		}
@@ -190,7 +186,7 @@ func ReportError(err error) {
 	}
 }
 
-// ReportErrorWithDetails reports an error with custom details using the global client
+// ReportErrorWithDetails reports an error with file and line using the global client.
 func ReportErrorWithDetails(err error, file string, line int) {
 	client := GetGlobalClient()
 	if client != nil {
@@ -198,8 +194,7 @@ func ReportErrorWithDetails(err error, file string, line int) {
 	}
 }
 
-// SubmitApplicationError reports an application error to the Errors view using
-// the global client.
+// SubmitApplicationError reports an error to the Errors view using the global client.
 func SubmitApplicationError(name, message, file string, line, statusCode int, httpMethod, httpURL, requestBody string) {
 	client := GetGlobalClient()
 	if client != nil {
@@ -219,7 +214,7 @@ func CapturePanicGlobal() {
 	case error:
 		err = v
 	case string:
-		err = fmt.Errorf("%s", v)
+		err = errors.New(v)
 	default:
 		err = fmt.Errorf("%v", v)
 	}
