@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ── Sampler ───────────────────────────────────────────────────────────────────
@@ -321,5 +324,26 @@ func TestGetGlobalConfig_AutoInit_NoEnv(t *testing.T) {
 	cfg := GetGlobalConfig()
 	if cfg == nil {
 		t.Error("expected non-nil config after auto-init with defaults")
+	}
+}
+
+// TestInit_RegistersW3CPropagator: without a registered global propagator,
+// middleware Extract calls are no-ops and distributed traces never link.
+func TestInit_RegistersW3CPropagator(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	otlpSrv := startOTLPServer(t)
+	defer otlpSrv.Close()
+	if err := Init(NewConfig(otlpSrv.URL, "svc", "tok")); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	header := http.Header{}
+	header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagation.HeaderCarrier(header))
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() || sc.TraceID().String() != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("W3C trace context not extracted, got %v", sc)
 	}
 }

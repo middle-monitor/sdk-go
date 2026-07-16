@@ -142,7 +142,7 @@ func GinMiddleware() gin.HandlerFunc {
 					panicErr = fmt.Errorf("%v", v)
 				}
 
-				// Record panic in span
+				// Record panic in span (or create an error span if we didn't sample this route)
 				if span != nil {
 					span.RecordError(panicErr)
 					span.SetStatus(codes.Error, panicErr.Error())
@@ -150,7 +150,27 @@ func GinMiddleware() gin.HandlerFunc {
 						attribute.Bool("error", true),
 						attribute.String("error.type", "panic"),
 					)
+				} else {
+					// So the panic is exported as a trace (backend + OpenSearch)
+					reqCtx := c.Request.Context()
+					_, panicSpan := tracer.Start(reqCtx, spanName,
+						trace.WithAttributes(
+							semconv.HTTPMethodKey.String(method),
+							semconv.HTTPRouteKey.String(route),
+							semconv.HTTPURLKey.String(c.Request.URL.String()),
+							semconv.HTTPStatusCodeKey.Int(http.StatusInternalServerError),
+							attribute.Bool("error", true),
+							attribute.String("error.type", "panic"),
+						),
+					)
+					panicSpan.RecordError(panicErr)
+					panicSpan.SetStatus(codes.Error, panicErr.Error())
+					panicSpan.End()
 				}
+
+				// Send to backend Errors API (application_errors) so it appears in Errors view.
+				file, line := getPanicLocation()
+				go submitApplicationError(cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, c.Request.URL.String(), requestBody)
 
 				panic(r) // Re-panic to let Gin's recovery handle it
 			}
@@ -192,6 +212,27 @@ func GinMiddleware() gin.HandlerFunc {
 			} else {
 				span.SetStatus(codes.Ok, "")
 			}
+		}
+
+		// For routes not sampled initially (e.g. /health), create a span only for 5xx
+		if !shouldSample && hasError && isServerError && cfg.ShouldSampleTrace(route, true) {
+			reqCtx := c.Request.Context()
+			_, errorSpan := tracer.Start(reqCtx, spanName,
+				trace.WithAttributes(
+					semconv.HTTPMethodKey.String(method),
+					semconv.HTTPRouteKey.String(route),
+					semconv.HTTPURLKey.String(c.Request.URL.String()),
+					semconv.HTTPStatusCodeKey.Int(finalStatus),
+					attribute.Bool("error", true),
+				),
+			)
+			if err != nil {
+				errorSpan.RecordError(err)
+				errorSpan.SetStatus(codes.Error, err.Error())
+			} else {
+				errorSpan.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", finalStatus))
+			}
+			errorSpan.End()
 		}
 
 		// Send only server errors (5xx) to the Errors view (message from err or from response body "error" field)

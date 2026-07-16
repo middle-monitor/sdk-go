@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -102,6 +103,12 @@ func newClient(cfg *Config) (*Client, error) {
 	)
 
 	otel.SetTracerProvider(tp)
+	// Without a registered propagator, otel.GetTextMapPropagator() is a no-op and
+	// the middlewares never link distributed traces across services.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 	tracer := tp.Tracer("middle-monitor")
 
 	// Initialize metric exporter

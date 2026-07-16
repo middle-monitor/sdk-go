@@ -66,6 +66,31 @@ func main() {
 }
 ```
 
+## Usage with net/http (ServeMux, gorilla/mux, chi, ...)
+
+```go
+package main
+
+import (
+    "net/http"
+
+    "github.com/middle-monitor/sdk-go"
+)
+
+func main() {
+    mux := http.NewServeMux()
+
+    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        panic("a panic") // Captured automatically
+    })
+
+    // One line to enable automatic capture
+    http.ListenAndServe(":8080", middlemonitor.HTTPMiddleware(mux))
+}
+```
+
+Works with any router built on `http.Handler`, e.g. gorilla/mux: `r.Use(middlemonitor.HTTPMiddleware)`.
+
 ## Panic capture at startup
 
 ```go

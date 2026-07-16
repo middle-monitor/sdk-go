@@ -276,6 +276,63 @@ func TestGinMiddleware_Panic_ErrorType(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 }
 
+func TestGinMiddleware_Panic_NoSpan(t *testing.T) {
+	// Panic on a route where sampling=0 (no span created) → middleware creates an error span
+	resetGlobalState()
+	defer resetGlobalState()
+
+	backendSrv := startBackendErrorsServer(t)
+	defer backendSrv.Close()
+
+	cfg := NewConfig(backendSrv.URL, "svc", "tok")
+	cfg.Sampling.Traces.Percentage = 0
+	cfg.Sampling.Traces.AlwaysSampleErrors = false
+	Init(cfg)
+
+	r := gin.New()
+	r.Use(gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
+	r.Use(GinMiddleware())
+	r.GET("/no-span", func(c *gin.Context) {
+		panic(errors.New("panic no span"))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/no-span", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	time.Sleep(150 * time.Millisecond)
+}
+
+func TestGinMiddleware_NeverSampleRoute_With5xx(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	backendSrv := startBackendErrorsServer(t)
+	defer backendSrv.Close()
+
+	cfg := NewConfig(backendSrv.URL, "svc", "tok")
+	cfg.Sampling.Traces.NeverSampleRoutes = []string{"/health"}
+	cfg.Sampling.Traces.AlwaysSampleErrors = true
+	Init(cfg)
+
+	r := gin.New()
+	r.Use(GinMiddleware())
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "db"})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("want 500, got %d", rec.Code)
+	}
+	time.Sleep(150 * time.Millisecond)
+}
+
 func TestGinMiddleware_Panic_StringType(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
