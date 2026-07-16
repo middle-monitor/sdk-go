@@ -265,10 +265,10 @@ func TestInit_NilConfig_NoEnv(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
 
-	// ConfigFromEnv always defaults to localhost:8080 when no env vars are set,
+	// ConfigFromEnv always defaults to api.middlemonitor.io when no env vars are set,
 	// so Init(nil) succeeds (client may fail to export later, but init succeeds).
 	_ = Init(nil)
-	// Verify that a config was set (endpoint defaults to localhost:8080)
+	// Verify that a config was set (endpoint defaults to api.middlemonitor.io)
 	if GetGlobalConfig() == nil {
 		t.Error("expected non-nil global config with default endpoint")
 	}
@@ -295,7 +295,7 @@ func TestInitSimple_NoEnv(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
 
-	// ConfigFromEnv defaults to localhost:8080 when no env vars are set → always succeeds
+	// ConfigFromEnv defaults to api.middlemonitor.io when no env vars are set → always succeeds
 	err := InitSimple()
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -306,7 +306,7 @@ func TestGetGlobalClient_AutoInit_NoEnv(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
 
-	// Auto-init with default endpoint (localhost:8080) → returns non-nil client
+	// Auto-init with default endpoint (api.middlemonitor.io) → returns non-nil client
 	client := GetGlobalClient()
 	if client == nil {
 		t.Error("expected non-nil client after auto-init with defaults")

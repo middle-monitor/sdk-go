@@ -137,7 +137,7 @@ Levels: `LogLevelDEBUG`, `LogLevelINFO`, `LogLevelWARN`, `LogLevelERROR`, `LogLe
 
 | Variable | Description | Required | Default |
 |---|---|---|---|
-| `MIDDLE_MONITOR_API_URL` | Middle-Monitor API URL (e.g. `http://localhost:8081`) | Recommended | `http://localhost:8080` |
+| `MIDDLE_MONITOR_API_URL` | Middle-Monitor ingestion URL | Recommended | `https://api.middlemonitor.io` |
 | `MIDDLE_MONITOR_TOKEN` | Authentication token | Recommended | — |
 | `MIDDLE_MONITOR_SERVICE` | Service name | No | `"unknown"` |
 
@@ -147,16 +147,8 @@ Only **server errors (5xx)** and **panics** are reported. **4xx** responses (401
 
 ### "failed to upload metrics" / "connection refused"
 
-The SDK sends traces, logs, and metrics to the configured URL (OTLP: `/v1/traces`, `/v1/logs`, `/v1/metrics`). If you see:
-
-```
-Post "http://localhost:8080/v1/metrics": dial tcp ... connection refused
-```
-
-Nothing is listening on the configured port. Set the correct backend URL:
+The SDK sends traces, logs, and metrics to the ingestion endpoint (OTLP: `/v1/traces`, `/v1/logs`, `/v1/metrics`). A connection error means the SDK can't reach it. Check that `MIDDLE_MONITOR_API_URL` points at your ingestion endpoint and that outbound HTTPS is allowed:
 
 ```bash
-export MIDDLE_MONITOR_API_URL="http://localhost:8081"
+export MIDDLE_MONITOR_API_URL="https://api.middlemonitor.io"
 ```
-
-In Docker Compose, use the service hostname instead of `localhost` (e.g. `http://backend:8080`).

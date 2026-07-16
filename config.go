@@ -115,15 +115,15 @@ func DefaultSamplingConfig() SamplingConfig {
 
 // NewConfig creates a new configuration with defaults
 func NewConfig(endpoint, service, token string) *Config {
-	// Default OTLP endpoint to middle-monitor backend (typically same host, port 8080)
-	// so that traces/logs are sent even when MIDDLE_MONITOR_API_URL is not set
+	// Default OTLP endpoint to the Middle-Monitor ingestion endpoint so that
+	// traces/logs are sent even when MIDDLE_MONITOR_API_URL is not set.
 	usedDefault := false
 	if endpoint == "" {
-		endpoint = "localhost:8080"
+		endpoint = "https://api.middlemonitor.io"
 		usedDefault = true
 	}
-	// Insecure = use HTTP (no TLS). Default/localhost and http:// are insecure.
-	insecure := usedDefault || strings.HasPrefix(endpoint, "http://")
+	// Insecure = use HTTP (no TLS). Only an explicit http:// endpoint is insecure.
+	insecure := strings.HasPrefix(endpoint, "http://")
 	// OTLP WithEndpoint expects "host:port" without scheme
 	normalized := normalizeOTLPEndpoint(endpoint)
 	if usedDefault {
@@ -144,7 +144,7 @@ func NewConfig(endpoint, service, token string) *Config {
 func normalizeOTLPEndpoint(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "localhost:8080"
+		return "api.middlemonitor.io"
 	}
 	// Strip scheme
 	if strings.HasPrefix(raw, "https://") {
@@ -165,7 +165,7 @@ func ConfigFromEnv() (*Config, error) {
 	if endpoint == "" {
 		endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 		if endpoint == "" {
-			endpoint = "http://localhost:8080" // Default: middle-monitor backend (same as typical PORT)
+			endpoint = "https://api.middlemonitor.io" // Default: Middle-Monitor ingestion endpoint
 		}
 	}
 

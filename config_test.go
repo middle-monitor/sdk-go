@@ -19,8 +19,8 @@ func resetGlobalState() {
 
 func TestNormalizeOTLPEndpoint_Empty(t *testing.T) {
 	got := normalizeOTLPEndpoint("")
-	if got != "localhost:8080" {
-		t.Fatalf("want localhost:8080, got %q", got)
+	if got != "api.middlemonitor.io" {
+		t.Fatalf("want api.middlemonitor.io, got %q", got)
 	}
 }
 
@@ -84,8 +84,8 @@ func TestNewConfig_EmptyEndpoint(t *testing.T) {
 	if cfg.Endpoint == "" {
 		t.Error("empty endpoint should get a default")
 	}
-	if !cfg.Insecure {
-		t.Error("default endpoint (localhost) should be insecure")
+	if cfg.Insecure {
+		t.Error("default endpoint (https ingest) should use TLS, not be insecure")
 	}
 	if cfg.Service != "svc" {
 		t.Errorf("want svc, got %q", cfg.Service)
