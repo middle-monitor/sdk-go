@@ -2,6 +2,8 @@
 
 Drop-in SDK for error reporting with Middle-Monitor. Auto-configured via environment variables, with automatic error and panic capture.
 
+**Documentation:** [middlemonitor.io/docs#sdk](https://middlemonitor.io/docs#sdk)
+
 ## Installation
 
 ```bash
