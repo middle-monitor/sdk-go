@@ -236,7 +236,7 @@ func GinMiddleware() gin.HandlerFunc {
 		}
 
 		// Send only server errors (5xx) to the Errors view (message from err or from response body "error" field)
-		if hasError && isServerError {
+		if hasError && isServerError && !cfg.DisableHTTPErrorReporting {
 			msg := getMessageForException(err, finalStatus, wrapper.bodyCapture)
 			if isGenericExceptionMessage(msg) {
 				if v, ok := c.Get(KeyExceptionMessage); ok {

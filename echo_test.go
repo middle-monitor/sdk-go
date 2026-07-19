@@ -496,12 +496,11 @@ func TestEchoMiddleware_TraceContextPropagation(t *testing.T) {
 }
 
 // TestEchoMiddleware_NilClient_BlockedAutoInit covers echo.go:75 — the nil-client
-// early return — by exhausting initOnce so GetGlobalClient() can never auto-init.
+// early return — with no token set, so GetGlobalClient() never auto-inits.
 func TestEchoMiddleware_NilClient_BlockedAutoInit(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
-	// Mark initOnce as done without setting globalClient so auto-init is a no-op
-	initOnce.Do(func() {})
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
 
 	e := echo.New()
 	e.Use(EchoMiddleware())

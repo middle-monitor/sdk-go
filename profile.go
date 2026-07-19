@@ -9,22 +9,18 @@ import (
 	"mime/multipart"
 	"net/http"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"time"
 )
 
-const defaultPprofURL = "http://localhost:6060"
-
-// CaptureCPUProfile collects a CPU profile for the given duration from the local pprof server,
-// then uploads it to the Middle-Monitor API.
+// CaptureCPUProfile collects a CPU profile for the given duration and uploads it
+// to the Middle-Monitor API. It profiles this process directly; set
+// Config.PprofURL to scrape an external pprof server instead.
 func (c *Client) CaptureCPUProfile(ctx context.Context, duration time.Duration) error {
 	cfg := c.config
 	if cfg == nil || cfg.Endpoint == "" || cfg.Token == "" {
 		return ErrConfigRequired
-	}
-	pprofURL := cfg.PprofURL
-	if pprofURL == "" {
-		pprofURL = defaultPprofURL
 	}
 	seconds := int(duration.Seconds())
 	if seconds < 1 {
@@ -33,24 +29,17 @@ func (c *Client) CaptureCPUProfile(ctx context.Context, duration time.Duration) 
 	if seconds > 120 {
 		seconds = 120
 	}
-	url := strings.TrimSuffix(pprofURL, "/") + fmt.Sprintf("/debug/pprof/profile?seconds=%d", seconds)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("create pprof request: %w", ErrPprofRequest)
+
+	var data []byte
+	var err error
+	if cfg.PprofURL != "" {
+		path := fmt.Sprintf("/debug/pprof/profile?seconds=%d", seconds)
+		data, err = fetchPprof(ctx, cfg.PprofURL, path, time.Duration(seconds)*time.Second+10*time.Second)
+	} else {
+		data, err = captureCPUInProcess(ctx, time.Duration(seconds)*time.Second)
 	}
-	client := &http.Client{Timeout: duration + 10*time.Second}
-	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch cpu profile: %w", ErrProfileFetch)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read profile: %w", ErrProfileRead)
+		return err
 	}
 	if len(data) == 0 {
 		return ErrProfileEmpty
@@ -58,44 +47,82 @@ func (c *Client) CaptureCPUProfile(ctx context.Context, duration time.Duration) 
 	return uploadProfile(cfg, "cpu", &seconds, nil, data)
 }
 
-// CaptureHeapProfile collects a heap profile from the local pprof server and uploads it to the Middle-Monitor API.
+// CaptureHeapProfile collects a heap profile and uploads it to the
+// Middle-Monitor API. It profiles this process directly; set Config.PprofURL to
+// scrape an external pprof server instead.
 func (c *Client) CaptureHeapProfile(ctx context.Context) error {
 	cfg := c.config
 	if cfg == nil || cfg.Endpoint == "" || cfg.Token == "" {
 		return ErrConfigRequired
 	}
-	pprofURL := cfg.PprofURL
-	if pprofURL == "" {
-		pprofURL = defaultPprofURL
+
+	var data []byte
+	var err error
+	if cfg.PprofURL != "" {
+		data, err = fetchPprof(ctx, cfg.PprofURL, "/debug/pprof/heap", 30*time.Second)
+	} else {
+		data, err = captureHeapInProcess()
 	}
-	url := strings.TrimSuffix(pprofURL, "/") + "/debug/pprof/heap"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("create pprof request: %w", ErrPprofRequest)
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch heap profile: %w", ErrProfileFetch)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read profile: %w", ErrProfileRead)
+		return err
 	}
 	if len(data) == 0 {
 		return ErrProfileEmpty
 	}
-	var memoryMB *float64
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	mb := float64(m.HeapInuse) / (1024 * 1024)
-	memoryMB = &mb
-	return uploadProfile(cfg, "heap", nil, memoryMB, data)
+	return uploadProfile(cfg, "heap", nil, &mb, data)
+}
+
+// captureCPUInProcess runs the CPU profiler for the given duration. Only one CPU
+// profile can be active per process, so a concurrent call fails rather than
+// silently returning a truncated profile.
+func captureCPUInProcess(ctx context.Context, duration time.Duration) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := pprof.StartCPUProfile(&buf); err != nil {
+		return nil, fmt.Errorf("start cpu profile: %w", ErrProfileInProgress)
+	}
+	select {
+	case <-time.After(duration):
+	case <-ctx.Done():
+	}
+	pprof.StopCPUProfile()
+	return buf.Bytes(), nil
+}
+
+// captureHeapInProcess writes the current heap profile. The GC runs first so the
+// profile reflects live objects rather than uncollected garbage.
+func captureHeapInProcess() ([]byte, error) {
+	runtime.GC()
+	var buf bytes.Buffer
+	if err := pprof.WriteHeapProfile(&buf); err != nil {
+		return nil, fmt.Errorf("write heap profile: %w", ErrProfileRead)
+	}
+	return buf.Bytes(), nil
+}
+
+// fetchPprof scrapes a profile from an external pprof HTTP server.
+func fetchPprof(ctx context.Context, baseURL, path string, timeout time.Duration) ([]byte, error) {
+	url := strings.TrimSuffix(baseURL, "/") + path
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create pprof request: %w", ErrPprofRequest)
+	}
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch profile: %w", ErrProfileFetch)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read profile: %w", ErrProfileRead)
+	}
+	return data, nil
 }
 
 // apiBase returns the HTTP base URL for the Middle-Monitor API.

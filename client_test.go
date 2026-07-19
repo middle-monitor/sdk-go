@@ -305,25 +305,64 @@ func TestInitSimple_NoEnv(t *testing.T) {
 	}
 }
 
-func TestGetGlobalClient_AutoInit_NoEnv(t *testing.T) {
+// An application that never opted in must not start exporting: without a token
+// there is nothing to authenticate against, so auto-init would silently ship
+// data to the default public endpoint on the first middleware call.
+func TestGetGlobalClient_NoToken_StaysNil(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
 
-	// Auto-init with default endpoint (api.middlemonitor.io) → returns non-nil client
-	client := GetGlobalClient()
-	if client == nil {
-		t.Error("expected non-nil client after auto-init with defaults")
+	if client := GetGlobalClient(); client != nil {
+		t.Error("expected nil client when MIDDLE_MONITOR_TOKEN is unset")
 	}
 }
 
-func TestGetGlobalConfig_AutoInit_NoEnv(t *testing.T) {
+func TestGetGlobalConfig_NoToken_StaysNil(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
+
+	if cfg := GetGlobalConfig(); cfg != nil {
+		t.Error("expected nil config when MIDDLE_MONITOR_TOKEN is unset")
+	}
+}
+
+// A configured application still gets the convenience of auto-init.
+func TestGetGlobalClient_WithToken_AutoInits(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "tok")
+	t.Setenv("MIDDLE_MONITOR_API_URL", "http://127.0.0.1:1")
+
+	if client := GetGlobalClient(); client == nil {
+		t.Error("expected auto-init to build a client when a token is set")
+	}
+	if cfg := GetGlobalConfig(); cfg == nil {
+		t.Error("expected auto-init to expose the config when a token is set")
+	}
+}
+
+// A failed init must not disable the SDK for the process lifetime: sync.Once
+// used to swallow every later attempt and return nil to the caller.
+func TestInit_FailureIsRetryable(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
 
-	// Auto-init with default endpoint → returns non-nil config
-	cfg := GetGlobalConfig()
-	if cfg == nil {
-		t.Error("expected non-nil config after auto-init with defaults")
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "tok")
+	t.Setenv("MIDDLE_MONITOR_API_URL", "http://127.0.0.1:1")
+	t.Setenv("MIDDLE_MONITOR_TRACES_SAMPLING", "not-a-number")
+
+	if err := Init(nil); err == nil {
+		t.Fatal("expected init to fail on an unparseable sampling value")
+	}
+
+	t.Setenv("MIDDLE_MONITOR_TRACES_SAMPLING", "0.5")
+	if err := Init(nil); err != nil {
+		t.Errorf("retry after a failed init should succeed, got %v", err)
+	}
+	if GetGlobalClient() == nil {
+		t.Error("expected a client after the successful retry")
 	}
 }
 

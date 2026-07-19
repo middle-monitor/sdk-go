@@ -27,21 +27,23 @@ var (
 	ErrLogExport     = errors.New("log export failed")
 
 	// profile.go
-	ErrPprofRequest   = errors.New("failed to create pprof request")
-	ErrProfileFetch   = errors.New("failed to fetch profile")
-	ErrProfileRead    = errors.New("failed to read profile")
-	ErrProfileEmpty   = errors.New("empty profile data")
-	ErrMultipartBuild = errors.New("multipart build failed")
-	ErrUploadRequest  = errors.New("failed to create upload request")
-	ErrProfileUpload  = errors.New("profile upload failed")
+	ErrPprofRequest      = errors.New("failed to create pprof request")
+	ErrProfileInProgress = errors.New("cpu profile already in progress")
+	ErrProfileFetch      = errors.New("failed to fetch profile")
+	ErrProfileRead       = errors.New("failed to read profile")
+	ErrProfileEmpty      = errors.New("empty profile data")
+	ErrMultipartBuild    = errors.New("multipart build failed")
+	ErrUploadRequest     = errors.New("failed to create upload request")
+	ErrProfileUpload     = errors.New("profile upload failed")
 
 	// config.go
-	ErrSamplingConfig    = errors.New("failed to parse sampling config")
-	ErrSamplingValue     = errors.New("invalid sampling value")
-	ErrSamplingRange     = errors.New("sampling must be between -1 and 1")
-	ErrLogLevel          = errors.New("invalid log level")
-	ErrMinHTTPStatus     = errors.New("invalid min http status")
-	ErrErrorSubmit       = errors.New("failed to submit error to backend")
+	ErrSamplingConfig = errors.New("failed to parse sampling config")
+	ErrSamplingValue  = errors.New("invalid sampling value")
+	ErrSamplingRange  = errors.New("sampling must be between -1 and 1")
+	ErrLogLevel       = errors.New("invalid log level")
+	ErrMinHTTPStatus  = errors.New("invalid min http status")
+	ErrBoolValue      = errors.New("invalid boolean value")
+	ErrErrorSubmit    = errors.New("failed to submit error to backend")
 )
 
 // HTTPStatusError carries a non-OK status code from an HTTP response.

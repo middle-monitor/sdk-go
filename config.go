@@ -37,9 +37,17 @@ type Config struct {
 	// Export protocol (grpc or http, default: http)
 	Protocol string
 
-	// PprofURL is the base URL of the process's pprof HTTP server (e.g. http://localhost:6060).
-	// Used by CaptureCPUProfile/CaptureHeapProfile to fetch profiles. Empty defaults to http://localhost:6060.
+	// PprofURL points CaptureCPUProfile/CaptureHeapProfile at an external pprof
+	// HTTP server (e.g. http://localhost:6060) instead of profiling this
+	// process. Empty (the default) profiles in-process, with no socket to expose.
 	PprofURL string
+
+	// DisableHTTPErrorReporting stops the HTTP middlewares from submitting 5xx
+	// responses to the Errors view. Set it when the application already reports
+	// its own errors: otherwise every failure is recorded twice, once by the
+	// application with the real cause and once by the middleware with whatever
+	// the response body happens to carry. Panics are still always reported.
+	DisableHTTPErrorReporting bool
 
 	// Sampling configuration
 	Sampling SamplingConfig
@@ -204,10 +212,18 @@ func ConfigFromEnv() (*Config, error) {
 	config := NewConfig(endpoint, service, token)
 	config.Protocol = protocol
 
+	// Only an explicit URL switches profiling to an external pprof server; the
+	// empty default profiles this process directly.
 	if pprofURL := os.Getenv("MIDDLE_MONITOR_PPROF_URL"); pprofURL != "" {
 		config.PprofURL = strings.TrimSuffix(strings.TrimSpace(pprofURL), "/")
-	} else {
-		config.PprofURL = "http://localhost:6060"
+	}
+
+	if v := os.Getenv("MIDDLE_MONITOR_DISABLE_HTTP_ERROR_REPORTING"); v != "" {
+		disable, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("MIDDLE_MONITOR_DISABLE_HTTP_ERROR_REPORTING: %w", ErrBoolValue)
+		}
+		config.DisableHTTPErrorReporting = disable
 	}
 
 	// Parse sampling configuration from environment

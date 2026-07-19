@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,8 +204,8 @@ func TestLog_NoClient(t *testing.T) {
 
 func TestLogSync_NoClient(t *testing.T) {
 	resetGlobalState()
-	// Block auto-init so GetGlobalClient() returns nil
-	initOnce.Do(func() {})
+	// No token: auto-init stays off and GetGlobalClient() returns nil
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
 	defer resetGlobalState()
 	err := LogSync(context.Background(), LogLevelINFO, "msg", nil)
 	if err != ErrNotInitialized {
@@ -214,8 +215,8 @@ func TestLogSync_NoClient(t *testing.T) {
 
 func TestLogSync_NoConfig(t *testing.T) {
 	resetGlobalState()
-	// Block auto-init, then set a client with no config so GetGlobalConfig() returns nil
-	initOnce.Do(func() {})
+	// No token, then a client with no config so GetGlobalConfig() returns nil
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
 	globalClient = &Client{}
 	defer resetGlobalState()
 	err := LogSync(context.Background(), LogLevelINFO, "msg", nil)
@@ -232,13 +233,64 @@ func TestFlushLogs_GlobalAPI(t *testing.T) {
 
 // TestStartLogFlusher_GoroutineBody covers log.go:35-37 — the goroutine body that
 // fires on each ticker tick. We shorten the interval so the test is fast.
+// Shutdown must end the flusher goroutine. Left running, it keeps ticking for
+// the rest of the process lifetime and flushes into providers already torn down
+// — a leak in every long-lived process that restarts its client.
+func TestShutdown_StopsLogFlusher(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	var flushes int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&flushes, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	old := logFlushInterval
+	logFlushInterval = 20 * time.Millisecond
+	defer func() { logFlushInterval = old }()
+
+	if err := Init(newLogTestConfig(srv.URL)); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	startLogFlusher()
+
+	// A buffered record gives the ticker something to send.
+	Log(context.Background(), LogLevelERROR, "before shutdown", nil)
+	time.Sleep(100 * time.Millisecond)
+	if atomic.LoadInt64(&flushes) == 0 {
+		t.Fatal("expected the flusher to have sent the buffered log")
+	}
+
+	client := GetGlobalClient()
+	if client == nil {
+		t.Fatal("expected an initialized client")
+	}
+	if err := client.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	// Buffer another record: a stopped flusher must never pick it up. Appended
+	// directly, because Log() restarts the flusher on purpose.
+	settled := atomic.LoadInt64(&flushes)
+	logBufferMu.Lock()
+	logBuffer = append(logBuffer, buildLogRecord(LogLevelERROR, "after shutdown", nil, GetGlobalConfig()))
+	logBufferMu.Unlock()
+
+	time.Sleep(150 * time.Millisecond)
+	if n := atomic.LoadInt64(&flushes); n != settled {
+		t.Errorf("flusher still ticking after shutdown: %d flushes, want %d", n, settled)
+	}
+}
+
 func TestStartLogFlusher_GoroutineBody(t *testing.T) {
-	flusherOnce = sync.Once{}
+	stopLogFlusher()
 	old := logFlushInterval
 	logFlushInterval = 20 * time.Millisecond
 	defer func() {
+		stopLogFlusher()
 		logFlushInterval = old
-		flusherOnce = sync.Once{}
 	}()
 	startLogFlusher()
 	time.Sleep(80 * time.Millisecond)
@@ -248,7 +300,7 @@ func TestStartLogFlusher_GoroutineBody(t *testing.T) {
 func TestLog_NilClient_Blocked(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
-	initOnce.Do(func() {}) // block auto-init so client stays nil
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "") // auto-init stays off, client stays nil
 	Log(context.Background(), LogLevelINFO, "msg", nil)
 }
 
@@ -256,7 +308,7 @@ func TestLog_NilClient_Blocked(t *testing.T) {
 func TestLog_NilConfig_Blocked(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
-	initOnce.Do(func() {}) // block auto-init
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "") // auto-init stays off
 	globalClient = &Client{}
 	Log(context.Background(), LogLevelINFO, "msg", nil)
 }

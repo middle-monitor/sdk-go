@@ -467,7 +467,7 @@ func TestGinMiddleware_TraceContextPropagation(t *testing.T) {
 func TestGinMiddleware_NilClient_BlockedAutoInit(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
-	initOnce.Do(func() {})
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
 
 	r := gin.New()
 	r.Use(GinMiddleware())

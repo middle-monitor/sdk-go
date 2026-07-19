@@ -2,17 +2,21 @@ package middlemonitor
 
 import (
 	"os"
-	"sync"
 	"testing"
 )
 
 // resetGlobalState resets package-level singletons so tests can re-init cleanly.
 func resetGlobalState() {
+	globalMu.Lock()
 	globalClient = nil
 	globalConfig = nil
-	initOnce = sync.Once{}
+	globalMu.Unlock()
+
+	stopLogFlusher()
+
+	logBufferMu.Lock()
 	logBuffer = nil
-	flusherOnce = sync.Once{}
+	logBufferMu.Unlock()
 }
 
 // ── normalizeOTLPEndpoint ─────────────────────────────────────────────────────

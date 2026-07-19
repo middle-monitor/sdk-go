@@ -2,6 +2,7 @@ package middlemonitor
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -215,19 +216,27 @@ func TestCaptureCPUProfile_DurationClamping(t *testing.T) {
 	}
 }
 
-func TestCaptureCPUProfile_DefaultPprofURL(t *testing.T) {
-	// When PprofURL is empty, it should default to http://localhost:6060 (which won't be running)
+// With no PprofURL the SDK profiles its own process, so a CPU profile is
+// produced without the application having to expose a pprof HTTP server.
+func TestCaptureCPUProfile_InProcess(t *testing.T) {
+	var got []byte
+	uploadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = readUploadedProfile(t, r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer uploadSrv.Close()
+
 	c := &Client{config: &Config{
-		Endpoint: "localhost:8080",
+		Endpoint: uploadSrv.URL,
 		Token:    "tok",
 		Insecure: true,
 		PprofURL: "",
 		Service:  "svc",
 	}}
-	err := c.CaptureCPUProfile(context.Background(), time.Second)
-	if err == nil {
-		t.Error("expected error when no pprof server available")
+	if err := c.CaptureCPUProfile(context.Background(), time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	assertPprofPayload(t, got)
 }
 
 // ── CaptureHeapProfile ────────────────────────────────────────────────────────
@@ -317,17 +326,51 @@ func TestCaptureHeapProfile_Success(t *testing.T) {
 	}
 }
 
-func TestCaptureHeapProfile_DefaultPprofURL(t *testing.T) {
+func TestCaptureHeapProfile_InProcess(t *testing.T) {
+	var got []byte
+	uploadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = readUploadedProfile(t, r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer uploadSrv.Close()
+
 	c := &Client{config: &Config{
-		Endpoint: "localhost:8080",
+		Endpoint: uploadSrv.URL,
 		Token:    "tok",
 		Insecure: true,
 		PprofURL: "",
 		Service:  "svc",
 	}}
-	err := c.CaptureHeapProfile(context.Background())
-	if err == nil {
-		t.Error("expected error when no pprof server available")
+	if err := c.CaptureHeapProfile(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertPprofPayload(t, got)
+}
+
+// readUploadedProfile returns the profile bytes from the multipart upload.
+func readUploadedProfile(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	file, _, err := r.FormFile("profile")
+	if err != nil {
+		t.Fatalf("no profile part in upload: %v", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("read profile part: %v", err)
+	}
+	return data
+}
+
+// assertPprofPayload checks the upload carries a real pprof profile: the format
+// is gzip-compressed protobuf, so a truncated or empty capture is caught here.
+func assertPprofPayload(t *testing.T, data []byte) {
+	t.Helper()
+	if len(data) == 0 {
+		t.Fatal("uploaded profile is empty")
+	}
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		t.Fatalf("expected a gzip-compressed pprof profile, got %d bytes starting with %x", len(data), data[:min(4, len(data))])
 	}
 }
 

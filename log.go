@@ -21,21 +21,50 @@ var (
 	logBufferMu      sync.Mutex
 	logBufferSize    = 10
 	logFlushInterval = 5 * time.Second
+	flusherMu        sync.Mutex
 	flusherOnce      sync.Once
+	flusherStop      chan struct{}
 )
 
 // startLogFlusher launches a single background goroutine that periodically flushes
 // the log buffer, so low-volume logs are delivered within logFlushInterval.
 func startLogFlusher() {
 	flusherOnce.Do(func() {
+		flusherMu.Lock()
+		flusherStop = make(chan struct{})
+		stop := flusherStop
+		flusherMu.Unlock()
+
+		// Read the interval here, not inside the goroutine: it keeps the only
+		// access on the caller's side.
+		interval := logFlushInterval
+
 		go func() {
-			ticker := time.NewTicker(logFlushInterval)
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
-			for range ticker.C {
-				FlushLogs(context.Background())
+			for {
+				select {
+				case <-ticker.C:
+					FlushLogs(context.Background())
+				case <-stop:
+					return
+				}
 			}
 		}()
 	})
+}
+
+// stopLogFlusher ends the background goroutine. Without it a shut-down client
+// leaves a ticker running for the rest of the process lifetime, flushing into a
+// closed exporter.
+func stopLogFlusher() {
+	flusherMu.Lock()
+	defer flusherMu.Unlock()
+	if flusherStop != nil {
+		close(flusherStop)
+		flusherStop = nil
+	}
+	flusherOnce = sync.Once{}
 }
 
 // Log sends a log record to Middle-Monitor. It buffers logs and flushes periodically.

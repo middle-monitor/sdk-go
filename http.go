@@ -203,7 +203,7 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Send only server errors (5xx) to the Errors view; 4xx are not reported
-		if isServerError {
+		if isServerError && !cfg.DisableHTTPErrorReporting {
 			msg := getMessageForException(nil, finalStatus, wrapper.bodyCapture)
 			// If handler wrote a 500 with empty/generic body but called ReportExceptionWithContext,
 			// use the stored message so Middle Monitor still has the real cause

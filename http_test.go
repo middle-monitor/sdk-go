@@ -48,8 +48,8 @@ func panicRecoveryHandler(next http.Handler) http.Handler {
 func TestHTTPMiddleware_NilClient_BlockedAutoInit(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
-	// Mark initOnce as done without setting globalClient so auto-init is a no-op
-	initOnce.Do(func() {})
+	// No token configured, so auto-init is a no-op and globalClient stays nil
+	t.Setenv("MIDDLE_MONITOR_TOKEN", "")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +185,49 @@ func TestHTTPMiddleware_ReportExceptionWithContext(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("no error submitted to the backend Errors API")
+	}
+}
+
+// An application that reports its own errors sets DisableHTTPErrorReporting so
+// each failure is recorded once, with the real cause, instead of twice — the
+// middleware would otherwise add an entry built from the generic response body.
+func TestHTTPMiddleware_DisableHTTPErrorReporting(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	submitted := make(chan struct{}, 1)
+	backendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/api/v1/errors") {
+			select {
+			case submitted <- struct{}{}:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backendSrv.Close()
+
+	cfg := NewConfig(backendSrv.URL, "svc", "tok")
+	cfg.DisableHTTPErrorReporting = true
+	Init(cfg)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/crash", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/crash", nil)
+	rec := httptest.NewRecorder()
+	HTTPMiddleware(mux).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("want 500, got %d", rec.Code)
+	}
+	select {
+	case <-submitted:
+		t.Error("middleware submitted a 5xx error despite DisableHTTPErrorReporting")
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 

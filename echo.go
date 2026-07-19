@@ -252,7 +252,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 			}
 
 			// Send only 5xx (and panics) to the Errors view; 4xx are not reported
-			if hasError && isServerError {
+			if hasError && isServerError && !cfg.DisableHTTPErrorReporting {
 				msg := getMessageForException(err, finalStatus, wrapper.bodyCapture)
 				// If handler returned 500 with empty/generic body but set KeyExceptionMessage, use that so Middle Monitor still has the real message
 				if isGenericExceptionMessage(msg) {

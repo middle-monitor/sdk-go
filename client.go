@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"go.opentelemetry.io/otel"
@@ -19,10 +20,17 @@ import (
 )
 
 var (
+	globalMu     sync.RWMutex
 	globalClient *Client
 	globalConfig *Config
-	initOnce     sync.Once
 )
+
+// globals reads the initialized client and config under the shared lock.
+func globals() (*Client, *Config) {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return globalClient, globalConfig
+}
 
 // loggingTraceExporter wraps a SpanExporter to log export success/failure (visible in app logs).
 type loggingTraceExporter struct {
@@ -152,32 +160,37 @@ func newClient(cfg *Config) (*Client, error) {
 	return client, nil
 }
 
-// Init initializes the global Middle-Monitor client with OpenTelemetry
+// Init initializes the global Middle-Monitor client with OpenTelemetry. It is
+// safe to call more than once: the first successful client wins. A FAILED
+// attempt is not remembered, so a caller can retry once the configuration is
+// fixed — with sync.Once, one early failure used to disable the SDK for the
+// whole process lifetime while returning nil to every later caller.
 func Init(cfg *Config) error {
-	var initErr error
-	initOnce.Do(func() {
-		if cfg == nil {
-			var err error
-			cfg, err = ConfigFromEnv()
-			if err != nil {
-				initErr = fmt.Errorf("failed to load config: %w", ErrConfigLoad)
-				return
-			}
-		}
+	globalMu.Lock()
+	defer globalMu.Unlock()
 
-		client, err := NewClientWithConfig(cfg)
+	if globalClient != nil {
+		return nil
+	}
+
+	if cfg == nil {
+		var err error
+		cfg, err = ConfigFromEnv()
 		if err != nil {
-			initErr = fmt.Errorf("failed to create client: %w", ErrClientCreate)
-			return
+			return fmt.Errorf("failed to load config: %w", ErrConfigLoad)
 		}
+	}
 
-		globalClient = client
-		globalConfig = cfg
+	client, err := NewClientWithConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", ErrClientCreate)
+	}
 
-		slog.Info("middlemonitor initialized", "service", cfg.Service, "endpoint", cfg.Endpoint)
-	})
+	globalClient = client
+	globalConfig = cfg
 
-	return initErr
+	slog.Info("middlemonitor initialized", "service", cfg.Service, "endpoint", cfg.Endpoint)
+	return nil
 }
 
 // InitWithConfig initializes with explicit configuration (backward compatibility)
@@ -191,20 +204,39 @@ func InitSimple() error {
 	return Init(nil)
 }
 
-// GetGlobalClient returns the global client
-func GetGlobalClient() *Client {
-	if globalClient == nil {
-		_ = InitSimple()
+// autoInit initializes from the environment, but only when a token is set.
+// Without a token there is nothing to authenticate an export with, and booting
+// anyway would silently point the exporter at the default public endpoint from
+// an application that never opted in — every entry point below would then start
+// sending data off-host on its first call.
+func autoInit() {
+	if os.Getenv("MIDDLE_MONITOR_TOKEN") == "" {
+		return
 	}
-	return globalClient
+	_ = InitSimple()
 }
 
-// GetGlobalConfig returns the global configuration
-func GetGlobalConfig() *Config {
-	if globalConfig == nil {
-		_ = InitSimple()
+// GetGlobalClient returns the global client, or nil when the SDK is not
+// configured. Callers must handle nil: it is the normal state of an
+// application that has not opted into Middle-Monitor.
+func GetGlobalClient() *Client {
+	c, _ := globals()
+	if c == nil {
+		autoInit()
+		c, _ = globals()
 	}
-	return globalConfig
+	return c
+}
+
+// GetGlobalConfig returns the global configuration, or nil when the SDK is not
+// configured.
+func GetGlobalConfig() *Config {
+	_, cfg := globals()
+	if cfg == nil {
+		autoInit()
+		_, cfg = globals()
+	}
+	return cfg
 }
 
 // GetTracer returns the tracer from the client
@@ -221,7 +253,9 @@ func (c *Client) GetMeter() metric.Meter {
 func (c *Client) Shutdown(ctx context.Context) error {
 	var errs []error
 
-	// Flush any buffered logs before shutdown
+	// Stop the periodic flusher first, then drain what is left, so no tick can
+	// fire against the providers being shut down below.
+	stopLogFlusher()
 	FlushLogs(ctx)
 
 	if c.tp != nil {
