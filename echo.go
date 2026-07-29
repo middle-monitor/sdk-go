@@ -173,7 +173,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 					// Send to backend Errors API (application_errors) so it appears in Errors view.
 					// Use first stack frame outside SDK/Echo so the reported file:line is the user's code (e.g. main.go), not echo.go.
 					file, line := getPanicLocation()
-					go submitApplicationError(cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, c.Request().URL.String(), requestBody)
+					go submitApplicationError(c.Request().Context(), cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, c.Request().URL.String(), requestBody)
 
 					panic(r) // Re-panic to let Echo's Recover middleware handle it
 				}
@@ -266,7 +266,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 				if file == "" {
 					file, line = "handler", 0
 				}
-				go submitApplicationError(cfg, "http", msg, file, line, finalStatus, method, c.Request().URL.String(), requestBody)
+				go submitApplicationError(c.Request().Context(), cfg, "http", msg, file, line, finalStatus, method, c.Request().URL.String(), requestBody)
 			}
 
 			return err
@@ -285,6 +285,7 @@ type appErrorPayload struct {
 	HTTPMethod *string   `json:"http_method,omitempty"`
 	HTTPURL    *string   `json:"http_url,omitempty"`
 	HTTPBody   *string   `json:"http_body,omitempty"`
+	TraceID    *string   `json:"trace_id,omitempty"`
 }
 
 // getPanicLocation returns the first (file, line) from the current stack that is not inside
@@ -362,7 +363,7 @@ func getMessageForException(err error, statusCode int, bodyCapture *bytes.Buffer
 // ReportException sends the given message to Middle Monitor (e.g. from a background job).
 // File/line are taken from the call stack. No HTTP code or URL — use ReportExceptionWithContext when in a request.
 func ReportException(message string) {
-	reportException(message, 0, "", "")
+	reportException(context.Background(), message, 0, "", "")
 }
 
 // ReportExceptionWithContext reports an error to Middle Monitor. Pass the request context (e.g. c.Request().Context()) when
@@ -403,10 +404,10 @@ func ReportExceptionWithContext(ctx context.Context, err error) {
 			}
 		}
 	}
-	reportException(message, statusCode, method, url)
+	reportException(ctx, message, statusCode, method, url)
 }
 
-func reportException(message string, statusCode int, method, url string) {
+func reportException(ctx context.Context, message string, statusCode int, method, url string) {
 	if statusCode > 0 && statusCode < 500 {
 		return
 	}
@@ -418,7 +419,7 @@ func reportException(message string, statusCode int, method, url string) {
 	if file == "" {
 		file, line = "handler", 0
 	}
-	go submitApplicationError(cfg, "http", message, file, line, statusCode, method, url, nil)
+	go submitApplicationError(ctx, cfg, "http", message, file, line, statusCode, method, url, nil)
 }
 
 // ReportExceptionFromEcho reports an exception with only the message. Method, URL and file/line are read from the Echo context and the call stack; the HTTP code is assumed 500 (server error).
@@ -431,14 +432,16 @@ func reportException(message string, statusCode int, method, url string) {
 //	}
 func ReportExceptionFromEcho(c echo.Context, message string) {
 	if c != nil && c.Request() != nil {
-		reportException(message, 500, c.Request().Method, c.Request().URL.String())
+		reportException(c.Request().Context(), message, 500, c.Request().Method, c.Request().URL.String())
 	} else {
-		reportException(message, 0, "", "")
+		reportException(context.Background(), message, 0, "", "")
 	}
 }
 
 // submitApplicationError sends the error to the backend Errors API so it appears in the Errors view.
-func submitApplicationError(cfg *Config, name, message, file string, line, statusCode int, method, url string, requestBody []byte) {
+// ctx is read for its span only, never for cancellation: callers dispatch this
+// in a goroutine that outlives the request.
+func submitApplicationError(ctx context.Context, cfg *Config, name, message, file string, line, statusCode int, method, url string, requestBody []byte) {
 	if cfg == nil || cfg.Endpoint == "" {
 		return
 	}
@@ -449,6 +452,11 @@ func submitApplicationError(cfg *Config, name, message, file string, line, statu
 		Line:      line,
 		Timestamp: time.Now().UTC(),
 		Service:   cfg.Service,
+	}
+	// Carry the active trace so the error links to the request that produced it.
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		traceID := sc.TraceID().String()
+		payload.TraceID = &traceID
 	}
 	if method != "" {
 		payload.HTTPMethod = &method

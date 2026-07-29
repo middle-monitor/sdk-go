@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 )
 
@@ -27,7 +28,7 @@ func TestBuildLogRecord_AllLevels(t *testing.T) {
 		LogLevelERROR, LogLevelFATAL, LogLevelPANIC,
 	}
 	for _, lvl := range levels {
-		rec := buildLogRecord(lvl, "test message", map[string]string{"k": "v"}, cfg)
+		rec := buildLogRecord(context.Background(), lvl, "test message", map[string]string{"k": "v"}, cfg)
 		if rec == nil {
 			t.Errorf("level %s: got nil record", lvl)
 		}
@@ -42,7 +43,7 @@ func TestBuildLogRecord_AllLevels(t *testing.T) {
 
 func TestBuildLogRecord_NoAttrs(t *testing.T) {
 	cfg := newTestConfig()
-	rec := buildLogRecord(LogLevelINFO, "msg", nil, cfg)
+	rec := buildLogRecord(context.Background(), LogLevelINFO, "msg", nil, cfg)
 	if rec == nil {
 		t.Fatal("expected non-nil record")
 	}
@@ -101,7 +102,7 @@ func TestSendLogs_Success(t *testing.T) {
 
 	cfg := newLogTestConfig(srv.URL)
 	cfg.Insecure = true
-	rec := buildLogRecord(LogLevelERROR, "test error", nil, cfg)
+	rec := buildLogRecord(context.Background(), LogLevelERROR, "test error", nil, cfg)
 
 	err := sendLogs(context.Background(), []*logspb.LogRecord{rec}, cfg)
 	if err != nil {
@@ -122,7 +123,7 @@ func TestSendLogs_Non200(t *testing.T) {
 
 	cfg := newLogTestConfig(srv.URL)
 	cfg.Insecure = true
-	rec := buildLogRecord(LogLevelERROR, "err", nil, cfg)
+	rec := buildLogRecord(context.Background(), LogLevelERROR, "err", nil, cfg)
 
 	err := sendLogs(context.Background(), []*logspb.LogRecord{rec}, cfg)
 	if err == nil {
@@ -134,7 +135,7 @@ func TestSendLogs_BadURL(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.Endpoint = "not-a-host:99999"
 	cfg.Insecure = true
-	rec := buildLogRecord(LogLevelERROR, "err", nil, cfg)
+	rec := buildLogRecord(context.Background(), LogLevelERROR, "err", nil, cfg)
 	err := sendLogs(context.Background(), []*logspb.LogRecord{rec}, cfg)
 	if err == nil {
 		t.Error("expected error for unreachable host")
@@ -172,7 +173,7 @@ func TestFlushLogs_WithRecords_ServerDown(t *testing.T) {
 
 	logBufferMu.Lock()
 	logBuffer = []*logspb.LogRecord{
-		buildLogRecord(LogLevelERROR, "err", nil, cfg),
+		buildLogRecord(context.Background(), LogLevelERROR, "err", nil, cfg),
 	}
 	logBufferMu.Unlock()
 
@@ -275,7 +276,7 @@ func TestShutdown_StopsLogFlusher(t *testing.T) {
 	// directly, because Log() restarts the flusher on purpose.
 	settled := atomic.LoadInt64(&flushes)
 	logBufferMu.Lock()
-	logBuffer = append(logBuffer, buildLogRecord(LogLevelERROR, "after shutdown", nil, GetGlobalConfig()))
+	logBuffer = append(logBuffer, buildLogRecord(context.Background(), LogLevelERROR, "after shutdown", nil, GetGlobalConfig()))
 	logBufferMu.Unlock()
 
 	time.Sleep(150 * time.Millisecond)
@@ -367,9 +368,46 @@ func TestSendLogs_BadURL_InvalidHost(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.Endpoint = "[invalid"
 	cfg.Insecure = true
-	rec := buildLogRecord(LogLevelERROR, "err", nil, cfg)
+	rec := buildLogRecord(context.Background(), LogLevelERROR, "err", nil, cfg)
 	err := sendLogs(context.Background(), []*logspb.LogRecord{rec}, cfg)
 	if err == nil {
 		t.Error("expected error for invalid endpoint URL")
+	}
+}
+
+// A log carrying its span lets the backend join it to the trace timeline; without
+// the ids the record is orphaned in OpenSearch, which is what makes correlated
+// incident debugging work at all.
+func TestBuildLogRecord_CarriesActiveSpan(t *testing.T) {
+	traceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	spanID := trace.SpanID{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18}
+
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	}))
+
+	rec := buildLogRecord(ctx, LogLevelERROR, "boom", nil, newTestConfig())
+
+	if string(rec.TraceId) != string(traceID[:]) {
+		t.Errorf("trace id not propagated: got %x, want %x", rec.TraceId, traceID[:])
+	}
+	if string(rec.SpanId) != string(spanID[:]) {
+		t.Errorf("span id not propagated: got %x, want %x", rec.SpanId, spanID[:])
+	}
+}
+
+// Logs emitted outside any span must stay unlinked rather than carry zeroed ids,
+// which the backend would index as a real trace and never match.
+func TestBuildLogRecord_NoSpanLeavesIdsEmpty(t *testing.T) {
+	rec := buildLogRecord(context.Background(), LogLevelINFO, "no span", nil, newTestConfig())
+
+	if len(rec.TraceId) != 0 {
+		t.Errorf("expected no trace id, got %x", rec.TraceId)
+	}
+	if len(rec.SpanId) != 0 {
+		t.Errorf("expected no span id, got %x", rec.SpanId)
 	}
 }

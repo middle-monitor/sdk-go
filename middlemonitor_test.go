@@ -3,12 +3,15 @@ package middlemonitor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ── NewClient ─────────────────────────────────────────────────────────────────
@@ -408,12 +411,12 @@ func TestGetPanicLocation_NoPanic(t *testing.T) {
 
 func TestSubmitApplicationError_NilConfig(t *testing.T) {
 	// Should not panic
-	submitApplicationError(nil, "http", "msg", "f.go", 10, 500, "GET", "/", nil)
+	submitApplicationError(context.Background(), nil, "http", "msg", "f.go", 10, 500, "GET", "/", nil)
 }
 
 func TestSubmitApplicationError_EmptyEndpoint(t *testing.T) {
 	cfg := &Config{}
-	submitApplicationError(cfg, "http", "msg", "f.go", 10, 500, "GET", "/", nil)
+	submitApplicationError(context.Background(), cfg, "http", "msg", "f.go", 10, 500, "GET", "/", nil)
 }
 
 func TestSubmitApplicationError_Success(t *testing.T) {
@@ -429,7 +432,7 @@ func TestSubmitApplicationError_Success(t *testing.T) {
 		Service:  "svc",
 		Token:    "tok",
 	}
-	submitApplicationError(cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", []byte(`{"key":"val"}`))
+	submitApplicationError(context.Background(), cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", []byte(`{"key":"val"}`))
 
 	select {
 	case <-received:
@@ -448,7 +451,7 @@ func TestSubmitApplicationError_LargeBody(t *testing.T) {
 
 	cfg := &Config{Endpoint: srv.URL, Service: "svc"}
 	largeBody := make([]byte, 3000)
-	submitApplicationError(cfg, "http", "msg", "f.go", 10, 500, "", "", largeBody)
+	submitApplicationError(context.Background(), cfg, "http", "msg", "f.go", 10, 500, "", "", largeBody)
 
 	select {
 	case <-received:
@@ -465,14 +468,14 @@ func TestSubmitApplicationError_ServerReturns4xx(t *testing.T) {
 
 	cfg := &Config{Endpoint: srv.URL, Service: "svc"}
 	// Should log warning but not panic
-	submitApplicationError(cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", nil)
+	submitApplicationError(context.Background(), cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", nil)
 	time.Sleep(100 * time.Millisecond)
 }
 
 func TestSubmitApplicationError_ServerUnreachable(t *testing.T) {
 	cfg := &Config{Endpoint: "http://localhost:19996", Service: "svc"}
 	// Should log error but not panic
-	submitApplicationError(cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", nil)
+	submitApplicationError(context.Background(), cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", nil)
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -481,20 +484,20 @@ func TestSubmitApplicationError_ServerUnreachable(t *testing.T) {
 func TestReportException_LowStatusCode(t *testing.T) {
 	resetGlobalState()
 	// status < 500 → return immediately
-	reportException("msg", 400, "GET", "/api")
+	reportException(context.Background(), "msg", 400, "GET", "/api")
 }
 
 func TestReportException_NoGlobalConfig(t *testing.T) {
 	resetGlobalState()
 	// No config → return immediately
-	reportException("msg", 500, "GET", "/api")
+	reportException(context.Background(), "msg", 500, "GET", "/api")
 }
 
 func TestReportException_EmptyEndpoint(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
 	globalConfig = &Config{Endpoint: ""}
-	reportException("msg", 500, "GET", "/api")
+	reportException(context.Background(), "msg", 500, "GET", "/api")
 }
 
 func TestReportException_WithServer(t *testing.T) {
@@ -510,7 +513,7 @@ func TestReportException_WithServer(t *testing.T) {
 		Endpoint: srv.URL,
 		Service:  "svc",
 	}
-	reportException("something failed", 0, "", "")
+	reportException(context.Background(), "something failed", 0, "", "")
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -524,7 +527,7 @@ func TestReportException_FileEmptyFallback(t *testing.T) {
 	defer srv.Close()
 
 	globalConfig = &Config{Endpoint: srv.URL, Service: "s"}
-	reportException("msg", 500, "POST", "/path")
+	reportException(context.Background(), "msg", 500, "POST", "/path")
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -590,5 +593,67 @@ func TestReportExceptionWithContext_WithFrameworkContext(t *testing.T) {
 	ReportExceptionWithContext(ctx, errors.New("framework err"))
 	if setter.vals[KeyExceptionMessage] != "framework err" {
 		t.Errorf("want 'framework err' in setter, got %v", setter.vals[KeyExceptionMessage])
+	}
+}
+
+// An error that carries its trace id is what lets the Errors view jump to the
+// failing request. Without it the backend indexes the error unlinked and the
+// "root cause" story the product sells does not hold.
+func TestSubmitApplicationError_CarriesTraceID(t *testing.T) {
+	payloads := make(chan appErrorPayload, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p appErrorPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		payloads <- p
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoint: srv.URL, Service: "svc", Token: "tok"}
+	traceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     trace.SpanID{0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18},
+		TraceFlags: trace.FlagsSampled,
+	}))
+
+	submitApplicationError(ctx, cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", nil)
+
+	select {
+	case p := <-payloads:
+		if p.TraceID == nil {
+			t.Fatal("trace_id missing from the error payload")
+		}
+		if *p.TraceID != traceID.String() {
+			t.Errorf("trace_id = %s, want %s", *p.TraceID, traceID.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive the error")
+	}
+}
+
+// Outside a span the field must be omitted entirely: an all-zero trace id would
+// be indexed as a real trace that matches nothing.
+func TestSubmitApplicationError_NoSpanOmitsTraceID(t *testing.T) {
+	payloads := make(chan appErrorPayload, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p appErrorPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		payloads <- p
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoint: srv.URL, Service: "svc", Token: "tok"}
+	submitApplicationError(context.Background(), cfg, "http", "msg", "f.go", 10, 500, "GET", "/api", nil)
+
+	select {
+	case p := <-payloads:
+		if p.TraceID != nil {
+			t.Errorf("expected no trace_id, got %s", *p.TraceID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive the error")
 	}
 }

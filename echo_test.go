@@ -2,6 +2,7 @@ package middlemonitor
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -628,7 +629,7 @@ func TestReportExceptionFromEcho_WithContext(t *testing.T) {
 func TestSubmitApplicationError_BadEndpoint(t *testing.T) {
 	cfg := &Config{Endpoint: "http://[invalid", Service: "svc"}
 	// Should not panic
-	submitApplicationError(cfg, "TypeError", "msg", "file.go", 10, 500, "GET", "/path", nil)
+	submitApplicationError(context.Background(), cfg, "TypeError", "msg", "file.go", 10, 500, "GET", "/path", nil)
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────────

@@ -147,7 +147,7 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 				}
 
 				file, line := getPanicLocation()
-				go submitApplicationError(cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, r.URL.String(), requestBody)
+				go submitApplicationError(r.Context(), cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, r.URL.String(), requestBody)
 
 				panic(rec) // Re-panic to let the server's recovery handle it
 			}
@@ -216,7 +216,7 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 			if file == "" {
 				file, line = "handler", 0
 			}
-			go submitApplicationError(cfg, "http", msg, file, line, finalStatus, method, r.URL.String(), requestBody)
+			go submitApplicationError(r.Context(), cfg, "http", msg, file, line, finalStatus, method, r.URL.String(), requestBody)
 		}
 	})
 }

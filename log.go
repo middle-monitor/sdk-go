@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	collectorlogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -82,7 +83,7 @@ func Log(ctx context.Context, level LogLevel, message string, attrs map[string]s
 	// Ensure the periodic flusher is running
 	startLogFlusher()
 
-	record := buildLogRecord(level, message, attrs, cfg)
+	record := buildLogRecord(ctx, level, message, attrs, cfg)
 	logBufferMu.Lock()
 	logBuffer = append(logBuffer, record)
 	shouldFlush := len(logBuffer) >= logBufferSize
@@ -103,7 +104,7 @@ func LogSync(ctx context.Context, level LogLevel, message string, attrs map[stri
 	if cfg == nil {
 		return ErrConfigMissing
 	}
-	record := buildLogRecord(level, message, attrs, cfg)
+	record := buildLogRecord(ctx, level, message, attrs, cfg)
 	return sendLogs(ctx, []*logspb.LogRecord{record}, cfg)
 }
 
@@ -112,7 +113,7 @@ func FlushLogs(ctx context.Context) {
 	flushLogs(ctx, GetGlobalClient(), GetGlobalConfig())
 }
 
-func buildLogRecord(level LogLevel, message string, attrs map[string]string, cfg *Config) *logspb.LogRecord {
+func buildLogRecord(ctx context.Context, level LogLevel, message string, attrs map[string]string, cfg *Config) *logspb.LogRecord {
 	now := uint64(time.Now().UnixNano())
 	severityNum := logLevelToSeverity(level)
 	severityText := string(level)
@@ -122,6 +123,14 @@ func buildLogRecord(level LogLevel, message string, attrs map[string]string, cfg
 		SeverityNumber: severityNum,
 		SeverityText:   severityText,
 		Body:           &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: message}},
+	}
+
+	// Carry the active span so the backend can link the log to its trace.
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		traceID := sc.TraceID()
+		spanID := sc.SpanID()
+		record.TraceId = traceID[:]
+		record.SpanId = spanID[:]
 	}
 
 	if len(attrs) > 0 {

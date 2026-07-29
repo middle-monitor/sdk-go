@@ -155,7 +155,7 @@ func (c *Client) SubmitApplicationError(name, message, file string, line, status
 	if requestBody != "" {
 		body = []byte(requestBody)
 	}
-	submitApplicationError(c.config, name, message, file, line, statusCode, httpMethod, httpURL, body)
+	submitApplicationError(context.Background(), c.config, name, message, file, line, statusCode, httpMethod, httpURL, body)
 }
 
 // CapturePanic captures a panic and reports it to Middle-Monitor

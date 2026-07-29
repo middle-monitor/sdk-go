@@ -170,7 +170,7 @@ func GinMiddleware() gin.HandlerFunc {
 
 				// Send to backend Errors API (application_errors) so it appears in Errors view.
 				file, line := getPanicLocation()
-				go submitApplicationError(cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, c.Request.URL.String(), requestBody)
+				go submitApplicationError(c.Request.Context(), cfg, "panic", panicErr.Error(), file, line, http.StatusInternalServerError, method, c.Request.URL.String(), requestBody)
 
 				panic(r) // Re-panic to let Gin's recovery handle it
 			}
@@ -249,7 +249,7 @@ func GinMiddleware() gin.HandlerFunc {
 			if file == "" {
 				file, line = "handler", 0
 			}
-			go submitApplicationError(cfg, "http", msg, file, line, finalStatus, method, c.Request.URL.String(), requestBody)
+			go submitApplicationError(c.Request.Context(), cfg, "http", msg, file, line, finalStatus, method, c.Request.URL.String(), requestBody)
 		}
 	}
 }
@@ -265,8 +265,8 @@ func GinMiddleware() gin.HandlerFunc {
 //	}
 func ReportExceptionFromGin(c *gin.Context, message string) {
 	if c != nil && c.Request != nil {
-		reportException(message, 500, c.Request.Method, c.Request.URL.String())
+		reportException(c.Request.Context(), message, 500, c.Request.Method, c.Request.URL.String())
 	} else {
-		reportException(message, 0, "", "")
+		reportException(context.Background(), message, 0, "", "")
 	}
 }
