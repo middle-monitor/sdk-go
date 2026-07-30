@@ -43,6 +43,44 @@ func TestResponseWriterWrapper_Write_ImplicitHeader(t *testing.T) {
 	}
 }
 
+// SSE handlers assert the writer to http.Flusher: a wrapper that hides it turns
+// streaming responses into empty bodies.
+func TestResponseWriterWrapper_Flush_PassesThrough(t *testing.T) {
+	rec := httptest.NewRecorder()
+	status := 200
+	var w http.ResponseWriter = &responseWriterWrapper{
+		ResponseWriter: rec,
+		statusCode:     &status,
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		t.Fatal("wrapper must implement http.Flusher")
+	}
+	_, _ = w.Write([]byte("data: hello\n\n"))
+	flusher.Flush()
+	if !rec.Flushed {
+		t.Error("flush was not forwarded to the underlying writer")
+	}
+}
+
+// WebSocket upgraders assert the writer to http.Hijacker; the wrapper must answer
+// for the writer it wraps instead of hiding the capability.
+func TestResponseWriterWrapper_Hijack_Unsupported(t *testing.T) {
+	rec := httptest.NewRecorder() // recorders cannot hijack
+	status := 200
+	var w http.ResponseWriter = &responseWriterWrapper{
+		ResponseWriter: rec,
+		statusCode:     &status,
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal("wrapper must implement http.Hijacker")
+	}
+	if _, _, err := hijacker.Hijack(); !errors.Is(err, http.ErrNotSupported) {
+		t.Errorf("want http.ErrNotSupported, got %v", err)
+	}
+}
+
 func TestResponseWriterWrapper_BodyCapture_5xx(t *testing.T) {
 	rec := httptest.NewRecorder()
 	status := 200

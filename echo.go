@@ -1,6 +1,7 @@
 package middlemonitor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"path/filepath"
 	"runtime"
@@ -64,6 +66,30 @@ func (w *responseWriterWrapper) Write(b []byte) (int, error) {
 		}
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// Flush keeps streaming handlers (SSE) working: without it the wrapper hides the
+// underlying http.Flusher and the type assertion in the handler fails.
+func (w *responseWriterWrapper) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Hijack keeps WebSocket upgrades working: echo and most upgraders type-assert the
+// writer to http.Hijacker, which the wrapper would otherwise hide.
+func (w *responseWriterWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return hijacker.Hijack()
+}
+
+// Unwrap exposes the original writer to http.ResponseController, so deadline
+// control and any future extension still reach it through the wrapper.
+func (w *responseWriterWrapper) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // EchoMiddleware returns an Echo middleware that automatically creates traces and logs with OpenTelemetry
