@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -62,6 +63,7 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 
 		cfg := GetGlobalConfig()
 		tracer := client.GetTracer()
+		start := time.Now()
 
 		// Extract context from request headers (W3C Trace Context)
 		propagator := otel.GetTextMapPropagator()
@@ -202,21 +204,29 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 			errorSpan.End()
 		}
 
-		// Send only server errors (5xx) to the Errors view; 4xx are not reported
-		if isServerError && !cfg.DisableHTTPErrorReporting {
-			msg := getMessageForException(nil, finalStatus, wrapper.bodyCapture)
+		// Cause of a 5xx, resolved once for both the Errors view and the request
+		// log so the two never disagree on what failed.
+		var cause string
+		if isServerError {
+			cause = getMessageForException(nil, finalStatus, wrapper.bodyCapture)
 			// If handler wrote a 500 with empty/generic body but called ReportExceptionWithContext,
 			// use the stored message so Middle Monitor still has the real cause
-			if isGenericExceptionMessage(msg) {
+			if isGenericExceptionMessage(cause) {
 				if s := store.message(); s != "" {
-					msg = s
+					cause = s
 				}
 			}
+		}
+
+		// Send only server errors (5xx) to the Errors view; 4xx are not reported
+		if isServerError && !cfg.DisableHTTPErrorReporting {
 			file, line := wrapper.capturedFile, wrapper.capturedLine
 			if file == "" {
 				file, line = "handler", 0
 			}
-			go submitApplicationError(r.Context(), cfg, "http", msg, file, line, finalStatus, method, r.URL.String(), requestBody)
+			go submitApplicationError(r.Context(), cfg, "http", cause, file, line, finalStatus, method, r.URL.String(), requestBody)
 		}
+
+		logHTTPRequest(r.Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause)
 	})
 }

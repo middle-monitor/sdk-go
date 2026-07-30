@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel"
@@ -68,6 +69,7 @@ func GinMiddleware() gin.HandlerFunc {
 
 		cfg := GetGlobalConfig()
 		tracer := client.GetTracer()
+		start := time.Now()
 
 		// Extract context from request headers (W3C Trace Context)
 		propagator := otel.GetTextMapPropagator()
@@ -235,22 +237,30 @@ func GinMiddleware() gin.HandlerFunc {
 			errorSpan.End()
 		}
 
-		// Send only server errors (5xx) to the Errors view (message from err or from response body "error" field)
-		if hasError && isServerError && !cfg.DisableHTTPErrorReporting {
-			msg := getMessageForException(err, finalStatus, wrapper.bodyCapture)
-			if isGenericExceptionMessage(msg) {
+		// Cause of a 5xx, resolved once for both the Errors view and the request
+		// log so the two never disagree on what failed.
+		var cause string
+		if hasError && isServerError {
+			cause = getMessageForException(err, finalStatus, wrapper.bodyCapture)
+			if isGenericExceptionMessage(cause) {
 				if v, ok := c.Get(KeyExceptionMessage); ok {
 					if s, ok := v.(string); ok && s != "" {
-						msg = s
+						cause = s
 					}
 				}
 			}
+		}
+
+		// Send only server errors (5xx) to the Errors view (message from err or from response body "error" field)
+		if hasError && isServerError && !cfg.DisableHTTPErrorReporting {
 			file, line := wrapper.capturedFile, wrapper.capturedLine
 			if file == "" {
 				file, line = "handler", 0
 			}
-			go submitApplicationError(c.Request.Context(), cfg, "http", msg, file, line, finalStatus, method, c.Request.URL.String(), requestBody)
+			go submitApplicationError(c.Request.Context(), cfg, "http", cause, file, line, finalStatus, method, c.Request.URL.String(), requestBody)
 		}
+
+		logHTTPRequest(c.Request.Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause)
 	}
 }
 

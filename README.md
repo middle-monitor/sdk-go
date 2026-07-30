@@ -167,6 +167,7 @@ Levels: `LogLevelDEBUG`, `LogLevelINFO`, `LogLevelWARN`, `LogLevelERROR`, `LogLe
 | `MIDDLE_MONITOR_API_URL` | Middle-Monitor ingestion URL | Recommended | `https://api.middlemonitor.io` |
 | `MIDDLE_MONITOR_TOKEN` | Authentication token | Recommended | — |
 | `MIDDLE_MONITOR_SERVICE` | Service name | No | `"unknown"` |
+| `MIDDLE_MONITOR_HOSTNAME` | Host this service runs on, as Middle-Monitor names it | In containers | `os.Hostname()` |
 | `MIDDLE_MONITOR_DISABLE_HTTP_ERROR_REPORTING` | Stop the middlewares from reporting 5xx | No | `false` |
 | `MIDDLE_MONITOR_PPROF_URL` | Scrape an external pprof server instead of profiling in-process | No | — |
 
@@ -185,6 +186,43 @@ middlemonitor.Init(cfg)
 ```
 
 Panics are still reported.
+
+## Request logs
+
+Each HTTP middleware also writes one log line per failed request, so the Logs view carries traffic without the application calling `Log` itself:
+
+```text
+GET /api/orders 500: pq: duplicate key value violates unique constraint
+```
+
+The line carries `http.method`, `http.route`, `http.status_code` and `duration_ms` as attributes, plus the trace id of the request — so a log opens onto the trace that produced it.
+
+What gets through is decided by the log sampling rules, not by the middleware. The defaults keep 2xx traffic out (that volume is what traces are for) and health probes out of the baseline:
+
+| Response | Level | Logged by default |
+|---|---|---|
+| 2xx / 3xx | INFO | No |
+| 4xx | WARN | Yes |
+| 5xx | ERROR | Yes |
+| `/health`, `/metrics`, `/ready` | — | No |
+
+Widen or narrow it per route or level:
+
+```go
+cfg := middlemonitor.NewConfig(apiURL, service, token)
+cfg.Sampling.Logs.Levels = []middlemonitor.LogLevel{middlemonitor.LogLevelINFO}   // every request
+cfg.Sampling.Logs.AlwaysCaptureRoutes = []string{"/api/payments/*"}               // every hit on a route
+middlemonitor.Init(cfg)
+```
+
+### Correlating with host metrics
+
+Every export is labelled with `host.name`, which is what lets Middle-Monitor line up a CPU or memory spike on a host with the traffic of the services running on it. Inside a container `os.Hostname()` is the container ID and matches no host, so set the real one:
+
+```yaml
+environment:
+  MIDDLE_MONITOR_HOSTNAME: host4   # as the host is named in Middle-Monitor
+```
 
 ## Profiling
 

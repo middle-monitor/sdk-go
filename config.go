@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // LogLevel represents a log level
@@ -41,6 +42,13 @@ type Config struct {
 	// HTTP server (e.g. http://localhost:6060) instead of profiling this
 	// process. Empty (the default) profiles in-process, with no socket to expose.
 	PprofURL string
+
+	// Hostname labels every export with the host the data comes from, so a CPU
+	// or memory anomaly on a host correlates with the traffic of the services
+	// running on it. Defaults to os.Hostname() — inside a container that is the
+	// container ID, so set MIDDLE_MONITOR_HOSTNAME to the host as Middle-Monitor
+	// names it, otherwise nothing joins the two sides.
+	Hostname string
 
 	// DisableHTTPErrorReporting stops the HTTP middlewares from submitting 5xx
 	// responses to the Errors view. Set it when the application already reports
@@ -143,9 +151,32 @@ func NewConfig(endpoint, service, token string) *Config {
 		Service:  service,
 		Token:    token,
 		Protocol: "http", // default to http
-		PprofURL: "",     // default applied when capturing (http://localhost:6060)
+		PprofURL: "",     // empty profiles this process, no external pprof server
+		Hostname: defaultHostname(),
 		Sampling: DefaultSamplingConfig(),
 	}
+}
+
+// hostnameFromOS is resolved once: it cannot change while the process runs. An
+// unresolvable hostname is not an error — the data is exported without a host
+// label rather than with a wrong one.
+var hostnameFromOS = sync.OnceValue(func() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+})
+
+// defaultHostname returns the host label for exports: MIDDLE_MONITOR_HOSTNAME
+// when the deployment sets it, the OS hostname otherwise. Resolved here rather
+// than in ConfigFromEnv alone so InitWithConfig, which never reads the
+// environment, still labels its exports with the right host.
+func defaultHostname() string {
+	if h := strings.TrimSpace(os.Getenv("MIDDLE_MONITOR_HOSTNAME")); h != "" {
+		return h
+	}
+	return hostnameFromOS()
 }
 
 // normalizeOTLPEndpoint returns "host:port" for OTLP WithEndpoint (no scheme, no path)

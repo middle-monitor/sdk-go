@@ -649,3 +649,73 @@ func startBackendErrorsServer(t *testing.T) *httptest.Server {
 		w.WriteHeader(http.StatusOK)
 	}))
 }
+
+// ── Request logs ──────────────────────────────────────────────────────────────
+
+// The middleware is the only place that knows a request happened. Without this,
+// the Logs view stays empty for any app that never calls Log() itself, and the
+// traffic side of a host CPU/memory correlation has nothing to aggregate.
+func TestEchoMiddleware_5xx_EmitsRequestLog(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	backendSrv := startBackendErrorsServer(t)
+	defer backendSrv.Close()
+
+	cfg := NewConfig(backendSrv.URL, "svc", "tok")
+	cfg.Insecure = true
+	Init(cfg)
+	logBufferMu.Lock()
+	logBuffer = nil
+	logBufferMu.Unlock()
+
+	e := echo.New()
+	e.Use(EchoMiddleware())
+	e.GET("/boom", func(c echo.Context) error {
+		return errors.New("db unreachable")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/boom", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 request log, got %d", len(recs))
+	}
+	if got := recs[0].Body.GetStringValue(); got != "GET /boom 500: db unreachable" {
+		t.Errorf("unexpected log body: %q", got)
+	}
+	time.Sleep(150 * time.Millisecond)
+}
+
+// A healthy request must not produce a log line: the Logs view would fill with
+// 2xx noise and the failures the correlation looks for would be buried.
+func TestEchoMiddleware_2xx_EmitsNoRequestLog(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	otlpSrv := startOTLPServer(t)
+	defer otlpSrv.Close()
+
+	cfg := NewConfig(otlpSrv.URL, "svc", "tok")
+	cfg.Insecure = true
+	Init(cfg)
+	logBufferMu.Lock()
+	logBuffer = nil
+	logBufferMu.Unlock()
+
+	e := echo.New()
+	e.Use(EchoMiddleware())
+	e.GET("/ok", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if recs := bufferedRecords(); len(recs) != 0 {
+		t.Fatalf("2xx must not be logged, got %d record(s)", len(recs))
+	}
+}

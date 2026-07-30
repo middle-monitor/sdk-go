@@ -2,6 +2,7 @@ package middlemonitor
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,7 +11,9 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	collectorlogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // newLogTestConfig returns a Config pointing at the given test server.
@@ -409,5 +412,253 @@ func TestBuildLogRecord_NoSpanLeavesIdsEmpty(t *testing.T) {
 	}
 	if len(rec.SpanId) != 0 {
 		t.Errorf("expected no span id, got %x", rec.SpanId)
+	}
+}
+
+// ── logHTTPRequest ────────────────────────────────────────────────────────────
+
+// bufferedRecords returns a snapshot of the pending log buffer.
+func bufferedRecords() []*logspb.LogRecord {
+	logBufferMu.Lock()
+	defer logBufferMu.Unlock()
+	out := make([]*logspb.LogRecord, len(logBuffer))
+	copy(out, logBuffer)
+	return out
+}
+
+// initForRequestLogs points the SDK at a server that swallows exports, so tests
+// can assert on what was buffered rather than on the wire.
+func initForRequestLogs(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := NewConfig(srv.URL, "svc", "tok")
+	cfg.Insecure = true
+	if err := Init(cfg); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	logBufferMu.Lock()
+	logBuffer = nil
+	logBufferMu.Unlock()
+}
+
+func recordAttr(rec *logspb.LogRecord, key string) string {
+	for _, kv := range rec.Attributes {
+		if kv.Key == key {
+			return kv.Value.GetStringValue()
+		}
+	}
+	return ""
+}
+
+// A 5xx must reach the Logs view carrying the cause, so an operator reading the
+// log line knows what failed without opening the trace or the Errors view.
+func TestLogHTTPRequest_5xxCarriesCauseAndAttributes(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "POST", "/api/orders", 500, 120*time.Millisecond, true, "pq: duplicate key")
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 buffered record, got %d", len(recs))
+	}
+	rec := recs[0]
+	if got := rec.Body.GetStringValue(); got != "POST /api/orders 500: pq: duplicate key" {
+		t.Errorf("unexpected body: %q", got)
+	}
+	if rec.SeverityText != string(LogLevelERROR) {
+		t.Errorf("want ERROR severity, got %q", rec.SeverityText)
+	}
+	if got := recordAttr(rec, "http.status_code"); got != "500" {
+		t.Errorf("want status attribute 500, got %q", got)
+	}
+	if got := recordAttr(rec, "http.route"); got != "/api/orders" {
+		t.Errorf("want route attribute, got %q", got)
+	}
+	if got := recordAttr(rec, "duration_ms"); got != "120" {
+		t.Errorf("want duration_ms 120, got %q", got)
+	}
+}
+
+// Successful traffic must stay out of the Logs view by default: request volume
+// is what traces are for, and logging every 2xx would drown the failures the
+// correlation is looking for.
+func TestLogHTTPRequest_2xxNotCapturedByDefault(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/orders", 200, time.Millisecond, false, "")
+
+	if recs := bufferedRecords(); len(recs) != 0 {
+		t.Fatalf("2xx must not be logged by default, got %d record(s)", len(recs))
+	}
+}
+
+// A 4xx is a failed request too: it is the signal behind an auth or quota storm,
+// so it is captured — as WARN, since the caller is at fault, not the service.
+func TestLogHTTPRequest_4xxCapturedAsWarn(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/orders", 429, time.Millisecond, true, "")
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 buffered record, got %d", len(recs))
+	}
+	if recs[0].SeverityText != string(LogLevelWARN) {
+		t.Errorf("want WARN severity, got %q", recs[0].SeverityText)
+	}
+}
+
+// Health probes run every few seconds on every service; capturing them would
+// dominate the Logs view and shift the baseline the correlation compares against.
+func TestLogHTTPRequest_NeverCaptureRouteStaysOut(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/health", 200, time.Millisecond, false, "")
+
+	if recs := bufferedRecords(); len(recs) != 0 {
+		t.Fatalf("/health must not be logged, got %d record(s)", len(recs))
+	}
+}
+
+// The "HTTP 500" fallback carries no information; appending it would repeat the
+// status already in the line instead of naming a cause.
+func TestLogHTTPRequest_GenericCauseNotAppended(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/x", 500, time.Millisecond, true, "HTTP 500")
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 buffered record, got %d", len(recs))
+	}
+	if got := recs[0].Body.GetStringValue(); got != "GET /api/x 500" {
+		t.Errorf("generic cause should be dropped, got %q", got)
+	}
+}
+
+func TestLogHTTPRequest_NilConfig(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	// Must not panic nor buffer anything
+	logHTTPRequest(context.Background(), nil, "GET", "/api/x", 500, time.Millisecond, true, "boom")
+	if recs := bufferedRecords(); len(recs) != 0 {
+		t.Fatalf("want no record, got %d", len(recs))
+	}
+}
+
+func TestHTTPStatusToLevel(t *testing.T) {
+	cases := []struct {
+		status int
+		want   LogLevel
+	}{
+		{200, LogLevelINFO},
+		{301, LogLevelINFO},
+		{404, LogLevelWARN},
+		{499, LogLevelWARN},
+		{500, LogLevelERROR},
+		{503, LogLevelERROR},
+	}
+	for _, c := range cases {
+		if got := httpStatusToLevel(c.status); got != c.want {
+			t.Errorf("status %d: want %s, got %s", c.status, c.want, got)
+		}
+	}
+}
+
+// ── Host label on the log resource ────────────────────────────────────────────
+
+// The host label is the join key of the whole correlation story: host CPU or
+// memory on one side, the traffic of the services running on that host on the
+// other. Dropped from the resource, the backend indexes an empty hostname and
+// the two sides can never be lined up.
+func TestSendLogs_ResourceCarriesHostName(t *testing.T) {
+	received := make(chan *collectorlogs.ExportLogsServiceRequest, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req collectorlogs.ExportLogsServiceRequest
+		if proto.Unmarshal(body, &req) == nil {
+			select {
+			case received <- &req:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := newLogTestConfig(srv.URL)
+	cfg.Insecure = true
+	cfg.Hostname = "host4"
+	rec := buildLogRecord(context.Background(), LogLevelERROR, "boom", nil, cfg)
+
+	if err := sendLogs(context.Background(), []*logspb.LogRecord{rec}, cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case req := <-received:
+		got := ""
+		for _, kv := range req.ResourceLogs[0].Resource.Attributes {
+			if kv.Key == "host.name" {
+				got = kv.Value.GetStringValue()
+			}
+		}
+		if got != "host4" {
+			t.Errorf("want host.name host4, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("test server did not receive the export")
+	}
+}
+
+// An empty host label would be indexed as a real (empty) hostname and match no
+// host, so it must be left out rather than sent blank.
+func TestSendLogs_OmitsUnresolvedHostName(t *testing.T) {
+	received := make(chan *collectorlogs.ExportLogsServiceRequest, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req collectorlogs.ExportLogsServiceRequest
+		if proto.Unmarshal(body, &req) == nil {
+			select {
+			case received <- &req:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := newLogTestConfig(srv.URL)
+	cfg.Insecure = true
+	cfg.Hostname = ""
+	rec := buildLogRecord(context.Background(), LogLevelERROR, "boom", nil, cfg)
+
+	if err := sendLogs(context.Background(), []*logspb.LogRecord{rec}, cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	select {
+	case req := <-received:
+		for _, kv := range req.ResourceLogs[0].Resource.Attributes {
+			if kv.Key == "host.name" {
+				t.Errorf("host.name should be absent, got %q", kv.Value.GetStringValue())
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("test server did not receive the export")
 	}
 }

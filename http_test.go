@@ -443,3 +443,41 @@ func TestHTTPMiddleware_TraceContextPropagation(t *testing.T) {
 		t.Errorf("want 200, got %d", rec.Code)
 	}
 }
+
+// The net/http middleware must produce the same request log as Echo and Gin: a
+// service instrumented through it is the one middle-monitor's own backend uses,
+// and its Logs view would otherwise only ever show what respondError logs.
+func TestHTTPMiddleware_5xx_EmitsRequestLog(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+
+	backendSrv := startBackendErrorsServer(t)
+	defer backendSrv.Close()
+
+	cfg := NewConfig(backendSrv.URL, "svc", "tok")
+	cfg.Insecure = true
+	Init(cfg)
+	logBufferMu.Lock()
+	logBuffer = nil
+	logBufferMu.Unlock()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/fail", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"db down"}`))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/fail", nil)
+	rec := httptest.NewRecorder()
+	HTTPMiddleware(mux).ServeHTTP(rec, req)
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 request log, got %d", len(recs))
+	}
+	if got := recs[0].Body.GetStringValue(); got != "GET /fail 500: db down" {
+		t.Errorf("unexpected log body: %q", got)
+	}
+	time.Sleep(150 * time.Millisecond)
+}

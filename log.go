@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -91,6 +92,51 @@ func Log(ctx context.Context, level LogLevel, message string, attrs map[string]s
 
 	if shouldFlush {
 		go flushLogs(ctx, client, cfg)
+	}
+}
+
+// logHTTPRequest records one entry per instrumented HTTP request, so the Logs
+// view carries per-service request volume — the half of the correlation that
+// host CPU/memory metrics cannot provide on their own.
+//
+// Gated by the log sampling rules, which is what keeps this from becoming an
+// access-log firehose: with the defaults only failed requests get through (4xx
+// as WARN, 5xx as ERROR), never the 2xx traffic. Widen it with
+// Sampling.Logs.Levels or AlwaysCaptureRoutes when a route deserves every hit.
+func logHTTPRequest(ctx context.Context, cfg *Config, method, route string, status int, duration time.Duration, hasError bool, cause string) {
+	if cfg == nil {
+		return
+	}
+	level := httpStatusToLevel(status)
+	if !cfg.ShouldSampleLog(route, level, status, hasError) {
+		return
+	}
+
+	message := fmt.Sprintf("%s %s %d", method, route, status)
+	// The cause is already extracted for the Errors view; carrying it here is
+	// what makes a 5xx line readable without opening the trace.
+	if cause != "" && !isGenericExceptionMessage(cause) {
+		message += ": " + cause
+	}
+
+	Log(ctx, level, message, map[string]string{
+		"http.method":      method,
+		"http.route":       route,
+		"http.status_code": strconv.Itoa(status),
+		"duration_ms":      strconv.FormatInt(duration.Milliseconds(), 10),
+	})
+}
+
+// httpStatusToLevel maps a response status onto the levels the sampling rules are
+// written in: 5xx is the service failing, 4xx is the caller at fault.
+func httpStatusToLevel(status int) LogLevel {
+	switch {
+	case status >= 500:
+		return LogLevelERROR
+	case status >= 400:
+		return LogLevelWARN
+	default:
+		return LogLevelINFO
 	}
 }
 
@@ -190,11 +236,19 @@ func sendLogs(ctx context.Context, records []*logspb.LogRecord, cfg *Config) err
 		return nil
 	}
 
-	resource := &resourcepb.Resource{
-		Attributes: []*commonpb.KeyValue{
-			{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: cfg.Service}}},
-		},
+	resAttrs := []*commonpb.KeyValue{
+		{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: cfg.Service}}},
 	}
+	// Same host label as the trace/metric resource, so log volume and host
+	// metrics can be lined up on the same host over the same window.
+	if cfg.Hostname != "" {
+		resAttrs = append(resAttrs, &commonpb.KeyValue{
+			Key:   "host.name",
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: cfg.Hostname}},
+		})
+	}
+
+	resource := &resourcepb.Resource{Attributes: resAttrs}
 
 	scopeLogs := &logspb.ScopeLogs{
 		Scope: &commonpb.InstrumentationScope{

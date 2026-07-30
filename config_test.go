@@ -475,3 +475,42 @@ func TestShouldSampleProbabilistic_Middle(t *testing.T) {
 		_ = shouldSampleProbabilistic(0.5)
 	}
 }
+
+// ── Hostname ──────────────────────────────────────────────────────────────────
+
+// A container's os.Hostname() is its container ID, which matches no host in
+// Middle-Monitor, so the explicit value must win: it is the only thing that lets
+// host metrics and this service's traffic be correlated.
+func TestConfigFromEnv_HostnameOverridesOSValue(t *testing.T) {
+	t.Setenv("MIDDLE_MONITOR_HOSTNAME", "  host4  ")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Hostname != "host4" {
+		t.Errorf("want host4, got %q", cfg.Hostname)
+	}
+}
+
+func TestNewConfig_HostnameDefaultsToOSValue(t *testing.T) {
+	t.Setenv("MIDDLE_MONITOR_HOSTNAME", "")
+	want, err := os.Hostname()
+	if err != nil {
+		t.Skip("hostname unavailable on this machine")
+	}
+	if got := NewConfig("http://localhost:8080", "svc", "tok").Hostname; got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// InitWithConfig never reads the environment, so without resolving the label in
+// NewConfig an app using that entry point would export the container ID as its
+// host and correlate with nothing.
+func TestNewConfig_HostnameFromEnv(t *testing.T) {
+	t.Setenv("MIDDLE_MONITOR_HOSTNAME", "host4")
+
+	if got := NewConfig("http://localhost:8080", "svc", "tok").Hostname; got != "host4" {
+		t.Errorf("want host4, got %q", got)
+	}
+}

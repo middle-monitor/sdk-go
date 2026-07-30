@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
@@ -71,11 +72,18 @@ func NewClientWithConfig(cfg *Config) (*Client, error) {
 // newClient creates a new OpenTelemetry-based client (internal function)
 func newClient(cfg *Config) (*Client, error) {
 	// Create resource with service information
+	attrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String(cfg.Service),
+		semconv.ServiceVersionKey.String("1.0.0"),
+	}
+	// host.name is what lets the backend tie this service's traffic to the host
+	// metrics collected by the agent. Omitted when unresolved, rather than sent
+	// empty: an empty term would match no host and silently break the join.
+	if cfg.Hostname != "" {
+		attrs = append(attrs, semconv.HostNameKey.String(cfg.Hostname))
+	}
 	res, err := resource.New(context.Background(),
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(cfg.Service),
-			semconv.ServiceVersionKey.String("1.0.0"),
-		),
+		resource.WithAttributes(attrs...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", ErrResourceCreate)

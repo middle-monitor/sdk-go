@@ -80,6 +80,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 
 			cfg := GetGlobalConfig()
 			tracer := client.GetTracer()
+			start := time.Now()
 
 			// Extract context from request headers (W3C Trace Context)
 			propagator := otel.GetTextMapPropagator()
@@ -251,23 +252,31 @@ func EchoMiddleware() echo.MiddlewareFunc {
 				errorSpan.End()
 			}
 
-			// Send only 5xx (and panics) to the Errors view; 4xx are not reported
-			if hasError && isServerError && !cfg.DisableHTTPErrorReporting {
-				msg := getMessageForException(err, finalStatus, wrapper.bodyCapture)
+			// Cause of a 5xx, resolved once for both the Errors view and the
+			// request log so the two never disagree on what failed.
+			var cause string
+			if hasError && isServerError {
+				cause = getMessageForException(err, finalStatus, wrapper.bodyCapture)
 				// If handler returned 500 with empty/generic body but set KeyExceptionMessage, use that so Middle Monitor still has the real message
-				if isGenericExceptionMessage(msg) {
+				if isGenericExceptionMessage(cause) {
 					if v := c.Get(KeyExceptionMessage); v != nil {
 						if s, ok := v.(string); ok && s != "" {
-							msg = s
+							cause = s
 						}
 					}
 				}
+			}
+
+			// Send only 5xx (and panics) to the Errors view; 4xx are not reported
+			if hasError && isServerError && !cfg.DisableHTTPErrorReporting {
 				file, line := wrapper.capturedFile, wrapper.capturedLine
 				if file == "" {
 					file, line = "handler", 0
 				}
-				go submitApplicationError(c.Request().Context(), cfg, "http", msg, file, line, finalStatus, method, c.Request().URL.String(), requestBody)
+				go submitApplicationError(c.Request().Context(), cfg, "http", cause, file, line, finalStatus, method, c.Request().URL.String(), requestBody)
 			}
+
+			logHTTPRequest(c.Request().Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause)
 
 			return err
 		}
