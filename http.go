@@ -227,6 +227,6 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 			go submitApplicationError(r.Context(), cfg, "http", cause, file, line, finalStatus, method, r.URL.String(), requestBody)
 		}
 
-		logHTTPRequest(r.Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause)
+		logHTTPRequest(r.Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause, resolveClientIP(cfg, r))
 	})
 }

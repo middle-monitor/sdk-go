@@ -461,7 +461,7 @@ func TestLogHTTPRequest_5xxCarriesCauseAndAttributes(t *testing.T) {
 	defer resetGlobalState()
 	initForRequestLogs(t)
 
-	logHTTPRequest(context.Background(), GetGlobalConfig(), "POST", "/api/orders", 500, 120*time.Millisecond, true, "pq: duplicate key")
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "POST", "/api/orders", 500, 120*time.Millisecond, true, "pq: duplicate key", "")
 
 	recs := bufferedRecords()
 	if len(recs) != 1 {
@@ -493,7 +493,7 @@ func TestLogHTTPRequest_2xxNotCapturedByDefault(t *testing.T) {
 	defer resetGlobalState()
 	initForRequestLogs(t)
 
-	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/orders", 200, time.Millisecond, false, "")
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/orders", 200, time.Millisecond, false, "", "")
 
 	if recs := bufferedRecords(); len(recs) != 0 {
 		t.Fatalf("2xx must not be logged by default, got %d record(s)", len(recs))
@@ -507,7 +507,7 @@ func TestLogHTTPRequest_4xxCapturedAsWarn(t *testing.T) {
 	defer resetGlobalState()
 	initForRequestLogs(t)
 
-	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/orders", 429, time.Millisecond, true, "")
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/orders", 429, time.Millisecond, true, "", "")
 
 	recs := bufferedRecords()
 	if len(recs) != 1 {
@@ -525,7 +525,7 @@ func TestLogHTTPRequest_NeverCaptureRouteStaysOut(t *testing.T) {
 	defer resetGlobalState()
 	initForRequestLogs(t)
 
-	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/health", 200, time.Millisecond, false, "")
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/health", 200, time.Millisecond, false, "", "")
 
 	if recs := bufferedRecords(); len(recs) != 0 {
 		t.Fatalf("/health must not be logged, got %d record(s)", len(recs))
@@ -539,7 +539,7 @@ func TestLogHTTPRequest_GenericCauseNotAppended(t *testing.T) {
 	defer resetGlobalState()
 	initForRequestLogs(t)
 
-	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/x", 500, time.Millisecond, true, "HTTP 500")
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/x", 500, time.Millisecond, true, "HTTP 500", "")
 
 	recs := bufferedRecords()
 	if len(recs) != 1 {
@@ -550,11 +550,49 @@ func TestLogHTTPRequest_GenericCauseNotAppended(t *testing.T) {
 	}
 }
 
+// The address is what turns a wall of 404s into "one host is scanning us", so it
+// has to travel on the log line itself, next to the route that was probed.
+func TestLogHTTPRequest_CarriesClientIP(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/wp-login.php", 404, time.Millisecond, true, "", "203.0.113.0")
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 buffered record, got %d", len(recs))
+	}
+	if got := recordAttr(recs[0], "client.ip"); got != "203.0.113.0" {
+		t.Errorf("want client.ip attribute, got %q", got)
+	}
+}
+
+// With collection off the attribute must be absent, not present and empty:
+// an empty value still says a request came from somewhere we chose not to record.
+func TestLogHTTPRequest_NoClientIPAttributeWhenEmpty(t *testing.T) {
+	resetGlobalState()
+	defer resetGlobalState()
+	initForRequestLogs(t)
+
+	logHTTPRequest(context.Background(), GetGlobalConfig(), "GET", "/api/x", 500, time.Millisecond, true, "boom", "")
+
+	recs := bufferedRecords()
+	if len(recs) != 1 {
+		t.Fatalf("want 1 buffered record, got %d", len(recs))
+	}
+	for _, kv := range recs[0].Attributes {
+		if kv.Key == "client.ip" {
+			t.Errorf("client.ip must be absent, got %q", kv.Value.GetStringValue())
+		}
+	}
+}
+
 func TestLogHTTPRequest_NilConfig(t *testing.T) {
 	resetGlobalState()
 	defer resetGlobalState()
 	// Must not panic nor buffer anything
-	logHTTPRequest(context.Background(), nil, "GET", "/api/x", 500, time.Millisecond, true, "boom")
+	logHTTPRequest(context.Background(), nil, "GET", "/api/x", 500, time.Millisecond, true, "boom", "")
 	if recs := bufferedRecords(); len(recs) != 0 {
 		t.Fatalf("want no record, got %d", len(recs))
 	}

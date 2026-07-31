@@ -57,6 +57,13 @@ type Config struct {
 	// the response body happens to carry. Panics are still always reported.
 	DisableHTTPErrorReporting bool
 
+	// ClientIP decides what the HTTP middlewares record as the caller's address
+	// on each request log. An IP address is personal data: the default keeps the
+	// network (203.0.113.0) and drops the host part, which still tells a scanner
+	// apart from real traffic. Set ClientIPFull only with a documented legal
+	// basis, ClientIPOff to record nothing.
+	ClientIP ClientIPMode
+
 	// Sampling configuration
 	Sampling SamplingConfig
 }
@@ -153,6 +160,7 @@ func NewConfig(endpoint, service, token string) *Config {
 		Protocol: "http", // default to http
 		PprofURL: "",     // empty profiles this process, no external pprof server
 		Hostname: defaultHostname(),
+		ClientIP: ClientIPAnonymized,
 		Sampling: DefaultSamplingConfig(),
 	}
 }
@@ -255,6 +263,16 @@ func ConfigFromEnv() (*Config, error) {
 			return nil, fmt.Errorf("MIDDLE_MONITOR_DISABLE_HTTP_ERROR_REPORTING: %w", ErrBoolValue)
 		}
 		config.DisableHTTPErrorReporting = disable
+	}
+
+	if v := os.Getenv("MIDDLE_MONITOR_CLIENT_IP"); v != "" {
+		mode := ClientIPMode(strings.ToLower(strings.TrimSpace(v)))
+		switch mode {
+		case ClientIPAnonymized, ClientIPFull, ClientIPOff:
+			config.ClientIP = mode
+		default:
+			return nil, fmt.Errorf("MIDDLE_MONITOR_CLIENT_IP: %w", ErrClientIPMode)
+		}
 	}
 
 	// Parse sampling configuration from environment

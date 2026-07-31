@@ -169,6 +169,7 @@ Levels: `LogLevelDEBUG`, `LogLevelINFO`, `LogLevelWARN`, `LogLevelERROR`, `LogLe
 | `MIDDLE_MONITOR_SERVICE` | Service name | No | `"unknown"` |
 | `MIDDLE_MONITOR_HOSTNAME` | Host this service runs on, as Middle-Monitor names it | In containers | `os.Hostname()` |
 | `MIDDLE_MONITOR_DISABLE_HTTP_ERROR_REPORTING` | Stop the middlewares from reporting 5xx | No | `false` |
+| `MIDDLE_MONITOR_CLIENT_IP` | Caller address on request logs: `anonymized`, `full` or `off` | No | `anonymized` |
 | `MIDDLE_MONITOR_PPROF_URL` | Scrape an external pprof server instead of profiling in-process | No | — |
 
 `MIDDLE_MONITOR_TOKEN` also acts as the opt-in switch: with no token set, the SDK does not initialize itself and every entry point is a no-op, so an application that never configured Middle-Monitor never sends anything.
@@ -214,6 +215,21 @@ cfg.Sampling.Logs.Levels = []middlemonitor.LogLevel{middlemonitor.LogLevelINFO} 
 cfg.Sampling.Logs.AlwaysCaptureRoutes = []string{"/api/payments/*"}               // every hit on a route
 middlemonitor.Init(cfg)
 ```
+
+### Caller address
+
+The request log also carries a `client.ip` attribute, which is what tells a wall of 404s on `/wp-login.php` apart from a real user hitting a broken page. It is read from `CF-Connecting-IP`, `True-Client-IP`, `X-Forwarded-For` or `X-Real-IP` before falling back to `RemoteAddr`, so a service behind Caddy, nginx or Cloudflare records the caller and not the proxy.
+
+An IP address is personal data, so the default keeps the network and drops the host part — `203.0.113.42` is stored as `203.0.113.0`, an IPv6 address is cut to its /48. That is enough to recognise a scan, not enough to single out a person.
+
+```go
+cfg := middlemonitor.NewConfig(apiURL, service, token)
+cfg.ClientIP = middlemonitor.ClientIPFull  // whole address: needs its own legal basis
+cfg.ClientIP = middlemonitor.ClientIPOff   // record nothing
+middlemonitor.Init(cfg)
+```
+
+Recording full addresses is a decision about your users' data: give it a legal basis and say so in your privacy policy. An address that does not parse is dropped rather than stored, so a forged header never lands in the attribute.
 
 ### Correlating with host metrics
 

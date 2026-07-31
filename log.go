@@ -103,7 +103,7 @@ func Log(ctx context.Context, level LogLevel, message string, attrs map[string]s
 // access-log firehose: with the defaults only failed requests get through (4xx
 // as WARN, 5xx as ERROR), never the 2xx traffic. Widen it with
 // Sampling.Logs.Levels or AlwaysCaptureRoutes when a route deserves every hit.
-func logHTTPRequest(ctx context.Context, cfg *Config, method, route string, status int, duration time.Duration, hasError bool, cause string) {
+func logHTTPRequest(ctx context.Context, cfg *Config, method, route string, status int, duration time.Duration, hasError bool, cause, clientIP string) {
 	if cfg == nil {
 		return
 	}
@@ -119,12 +119,18 @@ func logHTTPRequest(ctx context.Context, cfg *Config, method, route string, stat
 		message += ": " + cause
 	}
 
-	Log(ctx, level, message, map[string]string{
+	attrs := map[string]string{
 		"http.method":      method,
 		"http.route":       route,
 		"http.status_code": strconv.Itoa(status),
 		"duration_ms":      strconv.FormatInt(duration.Milliseconds(), 10),
-	})
+	}
+	// Absent unless Config.ClientIP allows it — see resolveClientIP.
+	if clientIP != "" {
+		attrs["client.ip"] = clientIP
+	}
+
+	Log(ctx, level, message, attrs)
 }
 
 // httpStatusToLevel maps a response status onto the levels the sampling rules are

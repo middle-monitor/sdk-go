@@ -43,6 +43,7 @@ var (
 	ErrLogLevel       = errors.New("invalid log level")
 	ErrMinHTTPStatus  = errors.New("invalid min http status")
 	ErrBoolValue      = errors.New("invalid boolean value")
+	ErrClientIPMode   = errors.New("invalid client ip mode")
 	ErrErrorSubmit    = errors.New("failed to submit error to backend")
 )
 

@@ -302,7 +302,7 @@ func EchoMiddleware() echo.MiddlewareFunc {
 				go submitApplicationError(c.Request().Context(), cfg, "http", cause, file, line, finalStatus, method, c.Request().URL.String(), requestBody)
 			}
 
-			logHTTPRequest(c.Request().Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause)
+			logHTTPRequest(c.Request().Context(), cfg, method, route, finalStatus, time.Since(start), hasError, cause, resolveClientIP(cfg, c.Request()))
 
 			return err
 		}

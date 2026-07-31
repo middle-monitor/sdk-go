@@ -1,6 +1,7 @@
 package middlemonitor
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -512,5 +513,29 @@ func TestNewConfig_HostnameFromEnv(t *testing.T) {
 
 	if got := NewConfig("http://localhost:8080", "svc", "tok").Hostname; got != "host4" {
 		t.Errorf("want host4, got %q", got)
+	}
+}
+
+// ── Client IP ─────────────────────────────────────────────────────────────────
+
+func TestConfigFromEnv_ClientIPMode(t *testing.T) {
+	t.Setenv("MIDDLE_MONITOR_CLIENT_IP", " FULL ")
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ClientIP != ClientIPFull {
+		t.Errorf("want full, got %q", cfg.ClientIP)
+	}
+}
+
+// A typo must not silently downgrade to storing full addresses: the deployment
+// asked for a specific privacy level and has to be told it did not get it.
+func TestConfigFromEnv_ClientIPModeRejectsUnknown(t *testing.T) {
+	t.Setenv("MIDDLE_MONITOR_CLIENT_IP", "anonymised")
+
+	if _, err := ConfigFromEnv(); !errors.Is(err, ErrClientIPMode) {
+		t.Errorf("want ErrClientIPMode, got %v", err)
 	}
 }
