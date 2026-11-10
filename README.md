@@ -10,6 +10,8 @@ Drop-in SDK for error reporting with Middle-Monitor. Auto-configured via environ
 go get github.com/middle-monitor/sdk-go
 ```
 
+Requires Go 1.26 or later since v0.2.0 (v0.1.x supported Go 1.21).
+
 ## Automatic configuration (recommended)
 
 Set the environment variables and the SDK initializes itself:
